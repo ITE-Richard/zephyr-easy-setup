@@ -54,20 +54,54 @@ REM Step 3: Configuring Environment PATH
 REM ------------------------------------------------------------
 echo.
 echo ===== [Step 3/10] Configuring Environment PATH =====
-set "PATH=%PATH%;C:\Program Files\7-Zip;C:\Program Files\Git\cmd;C:\Program Files\CMake\bin;%LocalAppData%\Programs\Python\Python312;%LocalAppData%\Programs\Python\Python312\Scripts;%LocalAppData%\Microsoft\WinGet\Links"
+REM Refresh installer changes without discarding the current process PATH.
+for /f "delims=" %%P in ('powershell.exe -NoProfile -Command "[Environment]::GetEnvironmentVariable('Path', 'Machine'); [Environment]::GetEnvironmentVariable('Path', 'User')"') do call :AddHostPath "%%P"
 
-where 7z >nul 2>nul
-if errorlevel 1 (
-    echo [WARNING] 7z command not found in PATH. Checking C:\Program Files\7-Zip...
-    if exist "C:\Program Files\7-Zip\7z.exe" (
-        set "PATH=%PATH%;C:\Program Files\7-Zip"
-    ) else (
-        echo [ERROR] 7-Zip is required for Zephyr SDK. Please check 7-Zip installation.
+REM Only add tool directories that actually contain the expected executable.
+set "ZEPHYR_HOST_PATH="
+call :AddToolPath "%ProgramFiles%\CMake\bin" "cmake.exe"
+call :AddToolPath "%ProgramFiles%\Git\cmd" "git.exe"
+call :AddToolPath "%ProgramFiles%\7-Zip" "7z.exe"
+call :AddToolPath "%LocalAppData%\Programs\Python\Python312" "python.exe"
+call :AddToolPath "%LocalAppData%\Programs\Python\Python312\Scripts" "pip.exe"
+call :AddToolPath "%ProgramFiles%\Python312" "python.exe"
+call :AddToolPath "%ProgramFiles%\Python312\Scripts" "pip.exe"
+for %%T in (ninja.exe gperf.exe dtc.exe wget.exe) do (
+    call :AddToolPath "%LocalAppData%\Microsoft\WinGet\Links" "%%T"
+    call :AddToolPath "%ProgramFiles%\WinGet\Links" "%%T"
+)
+REM The dtc winget package can expose usr\bin instead of a Links entry.
+for /d %%D in ("%LocalAppData%\Microsoft\WinGet\Packages\oss-winget.dtc_*" "%ProgramFiles%\WinGet\Packages\oss-winget.dtc_*") do call :AddToolPath "%%~fD\usr\bin" "dtc.exe"
+
+REM Do not report success when winget failed or an executable cannot start.
+for %%T in (cmake ninja gperf dtc git python wget) do (
+    echo Checking %%T...
+    %%T.exe --version >nul 2>nul
+    if errorlevel 1 (
+        echo [ERROR] %%T cannot run. Check its winget installation and PATH.
         pause
         exit /b 1
     )
+    where %%T.exe
 )
-echo [OK] Tools PATH verified.
+7z.exe i >nul 2>nul
+if errorlevel 1 (
+    echo [ERROR] 7-Zip cannot run. Check the 7zip.7zip installation and PATH.
+    pause
+    exit /b 1
+)
+where 7z.exe
+
+REM Persist missing host paths only; keep workspace .venv and SDK paths local.
+powershell.exe -NoProfile -Command "$ErrorActionPreference = 'Stop'; try { $userPath = [Environment]::GetEnvironmentVariable('Path', 'User'); $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine'); $known = @(($machinePath + ';' + $userPath) -split ';' | ForEach-Object { [Environment]::ExpandEnvironmentVariables($_.Trim()).TrimEnd('\') }); $updatedPath = $userPath; foreach ($dir in ($env:ZEPHYR_HOST_PATH -split ';')) { $dir = $dir.Trim().TrimEnd('\'); if ($dir -and $known -notcontains $dir) { if ([string]::IsNullOrEmpty($updatedPath)) { $updatedPath = $dir } else { $updatedPath = $updatedPath.TrimEnd(';') + ';' + $dir }; $known += $dir } }; if ($updatedPath -cne $userPath) { [Environment]::SetEnvironmentVariable('Path', $updatedPath, 'User') } } catch { Write-Error $_; exit 1 }"
+if errorlevel 1 (
+    echo [ERROR] Could not save host tool directories to the user PATH.
+    pause
+    exit /b 1
+)
+echo [OK] Host tools verified and missing directories saved to user PATH.
+echo [INFO] Restart your terminal application before building in another shell.
+echo [INFO] Then activate the workspace .venv before running west.
 
 REM ------------------------------------------------------------
 REM Step 4: Locating Python 3.12
@@ -214,3 +248,14 @@ if errorlevel 1 (
 )
 
 pause
+exit /b 0
+
+:AddHostPath
+set "PATH=%PATH%;%~1"
+exit /b 0
+
+:AddToolPath
+if not exist "%~1\%~2" exit /b 0
+set "PATH=%PATH%;%~1"
+set "ZEPHYR_HOST_PATH=%ZEPHYR_HOST_PATH%;%~1"
+exit /b 0
