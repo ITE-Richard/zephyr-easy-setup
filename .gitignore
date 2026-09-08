@@ -1,0 +1,16 @@
+# Zephyr Workspace and SDK
+zephyrproject/
+.venv/
+build/
+
+# Winget bundle and downloads
+*.msixbundle
+*.zip
+*.7z
+*.tar.gz
+
+# Logs and temporary files
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
