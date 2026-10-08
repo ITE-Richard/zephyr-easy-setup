@@ -13,6 +13,7 @@ $functions = $ast.FindAll({ param($node) $node -is [Management.Automation.Langua
 $toolsAssignment = $ast.EndBlock.Statements | Where-Object { $_ -is [Management.Automation.Language.AssignmentStatementAst] -and $_.Left.Extent.Text -eq '$Tools' }
 . ([scriptblock]::Create($toolsAssignment.Extent.Text))
 $Root = Join-Path $projectRoot ('offline_bundle\test-' + [guid]::NewGuid().ToString('N'))
+$fixtureRoot = $Root
 $Workspace = Join-Path $Root 'zephyrproject'
 $Cache = Join-Path $Root 'installers'
 $Board = $Qualifier = $Toolchain = ''
@@ -179,8 +180,29 @@ public static class BuildExitStub {
     Assert (Test-Path -LiteralPath "$Root\scripts\zephyr-manager.ps1") 'Selected installation is missing its helper.'
     Assert (Test-Path -LiteralPath "$Root\zephyr-uninstall.bat") 'Selected installation is missing its uninstaller.'
     Assert (Test-Path -LiteralPath "$Root\tests\verify-workflows.ps1") 'Selected installation is missing its test suite.'
-    $InstallDir = [IO.Path]::GetPathRoot($fixtureRoot)
-    Expect-Failure { Select-InstallDirectory } '*below a drive root*'
+    # Selecting a drive root is read-only here; never install or uninstall there.
+    $driveRoot = [IO.Path]::GetPathRoot($fixtureRoot)
+    $InstallDir = $driveRoot
+    Select-InstallDirectory
+    Assert ($Root -eq $driveRoot) 'Drive root lost its absolute-path separator.'
+    Assert ($Workspace -eq (Join-Path $driveRoot 'zephyrproject')) 'Drive-root workspace is incorrect.'
+    Assert ($Cache -eq (Join-Path $driveRoot 'installers')) 'Drive-root cache is incorrect.'
+    Assert ((Get-ToolsDirectory) -eq (Join-Path $Workspace '.host-tools')) 'Drive-root tools escaped the workspace.'
+    Assert ((Get-RelativeBundlePath (Join-Path $Cache 'tools\installer.zip') $Root) -eq 'installers\tools\installer.zip') 'Drive-root bundle path lost a character.'
+    Expect-Failure { Remove-Local $driveRoot $driveRoot } '*outside the expected*'
+    $InstallDir = ''
+    Set-Answers @($driveRoot)
+    Select-InstallDirectory
+    Assert ($Root -eq $driveRoot) 'Prompt rejected the drive root.'
+    $PackageRoot = $driveRoot
+    Set-Answers @('')
+    Select-InstallDirectory
+    Assert ($Root -eq $driveRoot) 'Installer at drive root changed its default installation path.'
+    $PackageRoot = $projectRoot
+    $output = @(& cmd.exe /c (Join-Path $projectRoot 'zephyr-easy-setup.bat') -InstallDir $driveRoot -CheckOnly)
+    Assert ($LASTEXITCODE -eq 0) 'Actual launcher rejected the drive-root installation path.'
+    Assert (($output -join "`n").Contains("Zephyr workspace:       $Workspace")) 'Actual launcher reported a wrong drive-root workspace.'
+    Write-Host '[PASS] Drive-root selection keeps absolute paths, owned tools and complete bundle paths.'
     $InstallDir = "$fixtureRoot\path with spaces"
     Expect-Failure { Select-InstallDirectory } '*must not contain spaces*'
     $InstallDir = "$fixtureRoot\unrelated\sentinel"
@@ -191,6 +213,7 @@ public static class BuildExitStub {
     finally { [IO.Directory]::Delete("$fixtureRoot\install-link") }
     $Root = $fixtureRoot
     $Workspace = Join-Path $Root 'zephyrproject'
+    $Cache = Join-Path $Root 'installers'
     Write-Host '[PASS] Install-directory prompt, named selection, path validation and copied launchers work.'
 
     $missing = Join-Path $fixtureRoot 'missing-helper'
@@ -207,5 +230,5 @@ public static class BuildExitStub {
     Write-Host 'All isolated workflow checks passed.'
 } finally {
     if (Test-Path -LiteralPath $junctionPath) { [IO.Directory]::Delete($junctionPath) }
-    Remove-Local $Root (Join-Path $projectRoot 'offline_bundle')
+    Remove-Local $fixtureRoot (Join-Path $projectRoot 'offline_bundle')
 }

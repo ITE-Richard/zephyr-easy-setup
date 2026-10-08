@@ -9,7 +9,14 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-$PackageRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..')).TrimEnd('\')
+
+function Get-DirectoryPath([string]$Path) {
+    $full = [IO.Path]::GetFullPath($Path)
+    if ($full -eq [IO.Path]::GetPathRoot($full)) { return $full }
+    return $full.TrimEnd('\')
+}
+
+$PackageRoot = Get-DirectoryPath (Join-Path $PSScriptRoot '..')
 $Root = $PackageRoot
 $Workspace = Join-Path $Root 'zephyrproject'
 $Cache = Join-Path $Root 'installers'
@@ -35,6 +42,18 @@ function Assert-Within([string]$Path, [string]$Parent) {
         throw "Path is outside the expected directory: $full"
     }
     return $full
+}
+
+function Get-RelativeBundlePath([string]$Path, [string]$Parent) {
+    $checked = Assert-Within $Path $Parent
+    $prefix = [IO.Path]::GetFullPath($Parent).TrimEnd('\') + '\'
+    return $checked.Substring($prefix.Length)
+}
+
+function Get-ToolsDirectory {
+    # Keep portable tools owned by this workspace when the base is a drive root.
+    if ($Root -eq [IO.Path]::GetPathRoot($Root)) { return Join-Path $Workspace '.host-tools' }
+    return Join-Path $Root 'tools'
 }
 
 function Assert-NoLinks([string]$Path) {
@@ -80,7 +99,7 @@ function Refresh-Path {
         "$env:ProgramFiles\Python312", "$env:LOCALAPPDATA\Microsoft\WinGet\Links", "$env:ProgramFiles\WinGet\Links"
     )
     foreach ($path in $known) { if (Test-Path -LiteralPath $path) { $env:Path = $path + ';' + $env:Path } }
-    foreach ($parent in @("$env:LOCALAPPDATA\Microsoft\WinGet\Packages", "$env:ProgramFiles\WinGet\Packages", (Join-Path $Root 'tools'))) {
+    foreach ($parent in @("$env:LOCALAPPDATA\Microsoft\WinGet\Packages", "$env:ProgramFiles\WinGet\Packages", (Get-ToolsDirectory))) {
         if (Test-Path -LiteralPath $parent) {
             foreach ($exe in Get-ChildItem -LiteralPath $parent -Filter '*.exe' -Recurse -File) {
                 if ($exe.BaseName -in @('ninja', 'dtc', 'gperf')) { $env:Path += ';' + $exe.DirectoryName }
@@ -209,15 +228,11 @@ function Select-InstallDirectory {
     $destination = $InstallDir
     if (-not $destination) {
         $default = $PackageRoot
-        if ($default.TrimEnd('\') -eq [IO.Path]::GetPathRoot($default).TrimEnd('\')) {
-            $default = Join-Path $default 'zephyr-easy-setup'
-        }
         $answer = Read-Host "Installation directory [$default]"
         $destination = $answer.Trim().Trim('"')
         if (-not $destination) { $destination = $default }
     }
-    $selected = [IO.Path]::GetFullPath($destination).TrimEnd('\')
-    if ($selected -eq [IO.Path]::GetPathRoot($selected).TrimEnd('\')) { throw 'Choose an installation folder below a drive root, for example D:\zephyr.' }
+    $selected = Get-DirectoryPath $destination
     if ($selected -match '\s') { throw 'The installation directory must not contain spaces.' }
     if (Test-Path -LiteralPath $selected -PathType Leaf) { throw "Installation directory is a file: $selected" }
     # Inspect existing ancestors before writing through the selected path.
@@ -319,7 +334,7 @@ function New-Bundle {
     if (-not $SourceWorkspace) { $SourceWorkspace = $Workspace }
     $source = (Resolve-Path -LiteralPath $SourceWorkspace).Path.TrimEnd('\')
     if ($source -match '\s') { throw 'The source workspace path must not contain spaces.' }
-    if (($Root + '\').StartsWith($source + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Source workspace cannot contain the packaging project.' }
+    if (($Root.TrimEnd('\') + '\').StartsWith($source + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Source workspace cannot contain the packaging project.' }
     $settings = Get-Settings $source
     $python = Join-Path $source '.venv\Scripts\python.exe'
     if (-not (Test-Path -LiteralPath $python)) { throw "Missing source virtual environment: $python" }
@@ -366,7 +381,7 @@ function New-Bundle {
             Invoke-Checked 'winget.exe' $hostDownloadArgs
         }
         $installer = Get-Installer $directory $tool.Extension
-        $hostEntries += @{ Id = $tool.Id; Name = $tool.Name; Path = $installer.FullName.Substring($Root.Length + 1); Sha256 = (Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256).Hash }
+        $hostEntries += @{ Id = $tool.Id; Name = $tool.Name; Path = (Get-RelativeBundlePath $installer.FullName $Root); Sha256 = (Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256).Hash }
     }
     # A clean venv proves wheel closure without contacting PyPI.
     $stage = Join-Path $Root ('offline_bundle\' + [guid]::NewGuid().ToString('N'))
@@ -408,7 +423,7 @@ function New-Bundle {
         $settings | Add-Member -NotePropertyName SdkDirectory -NotePropertyValue $sdkName -Force
         Save-Json $settings (Join-Path $targetWorkspace '.zephyr-setup.json')
         $files = @(Get-ChildItem -LiteralPath $bundle -Recurse -Force -File | ForEach-Object {
-            @{ Path = $_.FullName.Substring($bundle.Length + 1); Sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash }
+            @{ Path = (Get-RelativeBundlePath $_.FullName $bundle); Sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash }
         })
         Save-Json @{ Format = 1; Python = '3.12'; Architecture = 'x64'; Sdk = 'zephyrproject\' + $sdkName; Settings = $settings; HostTools = $hostEntries; Files = $files } (Join-Path $bundle 'bundle-manifest.json')
         Push-Location -LiteralPath $bundle
@@ -458,7 +473,7 @@ function Install-Offline {
         $entry = @($manifest.HostTools | Where-Object { $_.Id -eq $tool.Id })[0]
         $installer = Join-Path $Root $entry.Path
         if ($tool.Extension -eq '.zip') {
-            $destination = Join-Path $Root ('tools\' + $tool.Name)
+            $destination = Join-Path (Get-ToolsDirectory) $tool.Name
             New-Item -ItemType Directory -Path $destination -Force | Out-Null
             Invoke-Checked '7z.exe' @('x', '-y', ('-o' + $destination), $installer)
         } elseif ($tool.Name -eq 'python') {
@@ -511,9 +526,10 @@ function Clear-Registration {
     }
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     if ($userPath) {
+        $toolsPrefix = (Get-ToolsDirectory).TrimEnd('\') + '\'
         $kept = @($userPath -split ';' | Where-Object {
             $expanded = [Environment]::ExpandEnvironmentVariables($_).TrimEnd('\')
-            -not ($expanded.StartsWith($Workspace + '\', [StringComparison]::OrdinalIgnoreCase) -or $expanded.StartsWith($Root + '\tools\', [StringComparison]::OrdinalIgnoreCase))
+            -not ($expanded.StartsWith($Workspace + '\', [StringComparison]::OrdinalIgnoreCase) -or $expanded.StartsWith($toolsPrefix, [StringComparison]::OrdinalIgnoreCase))
         })
         if (($kept -join ';') -cne $userPath) { [Environment]::SetEnvironmentVariable('Path', ($kept -join ';'), 'User') }
     }
@@ -526,14 +542,15 @@ function Uninstall-Zephyr {
     if ((Read-Host 'Remove this Zephyr installation? (y/N)').Trim() -ine 'y') { Write-Host 'Cancelled. No changes made.'; return }
     $removeTools = (Read-Host 'Also uninstall shared Python, Git, CMake, Ninja, dtc, gperf and 7-Zip? (y/N)').Trim() -ieq 'y'
     $project = Assert-Within $Workspace $Root
+    $localTools = Get-ToolsDirectory
     Assert-NoLinks $project
-    Assert-NoLinks (Join-Path $Root 'tools')
+    Assert-NoLinks $localTools
     if (Test-Path -LiteralPath $project) {
         foreach ($child in Get-ChildItem -LiteralPath $project -Force) {
             if ($child.Name -ine 'app') { Remove-Local $child.FullName $project }
         }
     }
-    Remove-Local (Join-Path $Root 'tools') $Root
+    Remove-Local $localTools $Root
     Clear-Registration
     if ($removeTools) {
         Refresh-Path
