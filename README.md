@@ -10,6 +10,7 @@
 - 專案、來源工作區與解壓縮路徑不含空白，例如 `D:\zephyr-easy-setup`。
 - 使用 **Python 3.12 x64**；離線 wheels 固定給相同 Python 次版本與平台使用。
 - 線上安裝與首次補齊離線安裝檔需要網路及支援 `winget download` 的 WinGet。
+- 打包端需有可執行的 `7z.exe`；安裝檔、來源虛擬環境與 SDK 也會在打包前檢查。
 - 需有容納來源、wheels、SDK、暫存副本及 ZIP 的磁碟空間，通常為數 GB 以上。
 - CMake、Git、7-Zip 安裝可能需要系統管理員權限；在乾淨目標電腦上可從系統管理員命令提示字元執行安裝。移除使用者環境設定時，請使用原安裝者的帳號。
 
@@ -27,6 +28,26 @@ SDK 使用 `west sdk install -b <workspace> -t <toolchain>`，安裝到 `zephyr-
 
 主機工具目錄會補入使用者 PATH。SDK 與 `.venv` 由開發終端機載入，避免新終端機誤用另一個工作區的工具鏈。
 
+### 安裝位置
+
+工作區固定在腳本所在專案的 `zephyrproject` 子目錄，不隨啟動命令時的工作目錄改變。目前專案位於 `D:\github\zephyr-easy-setup`，因此預設配置如下：
+
+```text
+D:\github\zephyr-easy-setup\zephyrproject\
+  zephyr\                    Zephyr 原始碼
+  modules\                   west manifest 指定的相依模組
+  .west\                     west 工作區設定
+  .venv\                     Python 套件與 west
+  zephyr-sdk-<version>\       新下載的 SDK 與目標工具鏈
+  .zephyr-setup.json          板卡、qualifier、工具鏈與 SDK 位置
+  app\blinky\                範例程式
+  app\blinky\build\zephyr\   範例編譯輸出
+```
+
+相依倉庫的實際子目錄由所選 Zephyr 的 west manifest 決定。若專案搬到其他位置，工作區也會跟隨腳本位置改變。重用的外部 SDK 保留在原位置；設定檔的 `SdkDirectory` 對本工作區 SDK 使用相對路徑，對外部 SDK 使用絕對路徑。
+
+Python、Git、CMake、7-Zip 等主機工具由 WinGet 安裝到各自的 Windows 安裝目錄，實際位置依套件與安裝範圍而定。離線安裝時，Ninja、dtc、gperf 則解壓縮到本專案的 `tools\<工具名稱>`，其可執行檔目錄會加入 PATH。
+
 ### 自訂板卡、工具鏈與版本
 
 ```cmd
@@ -36,7 +57,7 @@ zephyr-easy-setup.bat stm32f4_disco "" arm-zephyr-eabi
 zephyr-easy-setup.bat it51xxx_evb it51xxx_evb/it51526aw riscv64-zephyr-elf v4.1.0
 ```
 
-自訂 BOARD 而未提供 QUALIFIER 時，不會套用 ITE 的 qualifier。板卡、qualifier 與工具鏈保存在 `.zephyr-setup.json`，供後續離線打包及安裝使用。REVISION 只用於建立新工作區；既有工作區不會自動切換版本。
+明確提供 BOARD 時，會先清除既有 qualifier；只有同時提供 QUALIFIER 才重新設定。未提供的板卡與工具鏈參數會沿用 `zephyrproject\.zephyr-setup.json`；沒有設定檔時才使用 ITE 預設值。該設定檔供後續離線打包及安裝使用。REVISION 只用於建立新工作區；若既有 `.west` 工作區仍傳入 REVISION，腳本會回報錯誤，不會切換版本。
 
 自動 SDK 安裝需要所選 Zephyr 提供 `west sdk`。對於沒有該指令的舊版本，先準備相容的 SDK，再使用共用 PowerShell 入口指定它：
 
@@ -75,16 +96,18 @@ zephyr-pack-offline.bat -SourceWorkspace D:\existing\zephyrproject -SdkPath D:\s
 打包會：
 
 1. 讀取來源 `.venv` 的 `pip freeze --all`，固定目前實際套件版本，下載可直接安裝的 wheels。
-2. 重用 `installers\tools\<package-id>` 中的安裝檔；缺少時透過 WinGet 下載 x64 EXE、MSI 或 ZIP。
+2. 重用 `installers\tools\<package-id>` 中的安裝檔；缺少時透過 WinGet 下載 x64 EXE、MSI 或 ZIP。這些主機工具下載沒有指定 `--version`，不保證與來源電腦已安裝的工具版本相同；Python 套件則固定來源 `.venv` 的實際版本。
 3. 在乾淨的暫存 `.venv` 使用 `--no-index` 安裝全部固定版本、執行 `pip check`，並驗證 Zephyr / 模組 requirements。
 4. 複製程式碼、`.west`、`.git`、SDK、安裝檔及安裝／卸載腳本到暫存目錄。只在副本排除來源 `.venv` 與 `app\blinky\build`，保留其他檔案與來源編譯結果。
 5. 建立逐檔 SHA-256 的 `bundle-manifest.json`，使用 7-Zip 壓縮並測試 ZIP。成功後才替換 `zephyr-offline-bundle.zip`。
 
-**已安裝的工具不等於仍保留安裝檔。** 若原電腦沒有 Python、Git 等離線安裝程式或缺少 wheels，首次打包需連網補齊。已有完整快取時可以強制只使用本地內容：
+**已安裝的工具不等於仍保留安裝檔。** 若原電腦沒有 Python、Git 等離線安裝程式或缺少 wheels，首次打包需連網補齊。已有完整快取時，可讓 pip 下載使用 `--no-index`，並禁止下載缺少的主機工具安裝檔：
 
 ```cmd
 zephyr-pack-offline.bat -CacheOnly
 ```
+
+`-CacheOnly` 仍會驗證來源 `.venv` 與 Zephyr / 模組 requirements，並建立及測試 ZIP。快取不足時直接回報錯誤，不會自動改成連網下載。
 
 快取的目錄格式如下，每個工具目錄應只有一個符合副檔名的安裝檔（WinGet 產生的 YAML 可以保留）：
 
@@ -111,7 +134,7 @@ wheel 不可取得、SDK / 模組不完整、local / editable Python dependency�
 zephyr-offline-install.bat
 ```
 
-安裝前會檢查 manifest、SHA-256 與必要檔案，接著安裝或辨識主機工具、解壓縮 portable tools、建立新的 `.venv`、從固定版本 wheels 安裝 Python 套件、註冊 Zephyr / SDK 並編譯 Blinky。此流程不執行 `winget install`、`west update` 或 `west sdk install`，pip 使用 `--isolated --no-index`。
+安裝前會檢查 manifest、SHA-256 與必要檔案，接著安裝或辨識主機工具、解壓縮 portable tools、建立 `.venv`、從固定版本 wheels 安裝 Python 套件、註冊 Zephyr / SDK 並編譯 Blinky。若已有 Python 3.12 x64 的相容 `.venv`，會重用並安裝固定版本套件；不會自動刪除該環境。此流程不執行 `winget install`、`west update` 或 `west sdk install`，pip 使用 `--isolated --no-index`。
 
 可先只檢查離線包：
 
@@ -119,7 +142,21 @@ zephyr-offline-install.bat
 zephyr-offline-install.bat -CheckOnly
 ```
 
-可用 `-Board`、`-Qualifier`、`-Toolchain` 覆寫目標；SDK 必須已包含對應工具鏈。安裝程式若要求重新啟動，腳本會停止，重啟後再執行。卸載後要重新離線安裝時，請重新解壓縮完整 ZIP。
+`-CheckOnly` 檢查 manifest 格式、列出的檔案雜湊、必要工作區檔案、SDK 版本檔、wheels 是否存在及主機安裝檔清單；它不執行安裝、Python 相依性驗證、SDK 編譯器或 Blinky 編譯。
+
+可用 `-Board`、`-Qualifier`、`-Toolchain` 覆寫目標；SDK 必須已包含對應工具鏈。例如：
+
+```cmd
+zephyr-offline-install.bat -Board stm32f4_disco -Toolchain arm-zephyr-eabi
+```
+
+安裝程式若要求重新啟動，腳本會停止，重啟後再執行。覆寫目標會更新設定檔，之後若要再次通過原 manifest 的雜湊檢查，請重新解壓縮完整 ZIP；卸載後重裝也需要重新解壓縮。
+
+### Release ZIP 與完整離線包
+
+Release 的 `zephyr-easy-setup-v<version>.zip` 提供腳本、文件與測試。包含 Zephyr 原始碼、SDK、Python wheels 及主機工具安裝檔的 `zephyr-offline-bundle.zip`，需由 `zephyr-pack-offline.bat` 在完整來源環境中產生，輸出到打包腳本所在的專案根目錄。
+
+完整離線包包含 `zephyr-offline-install.bat`、`zephyr-uninstall.bat`、`zephyr-env.cmd`、`scripts`、README、manifest、安裝快取與工作區；不包含線上安裝／打包入口或 `tests` 目錄。下方隔離測試指令適用於原始碼 checkout 或 Release 腳本 ZIP。
 
 ## 確認後卸載
 
@@ -161,7 +198,7 @@ zephyr-easy-setup/
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\verify-workflows.ps1
 ```
 
-測試使用專案內的暫存資料，涵蓋取消卸載、保留 app、限制刪除範圍、拒絕 junction、保留隱藏 metadata、SHA-256 / 安裝檔檢查及批次檔錯誤碼。測試不安裝／移除系統工具，也不寫入使用者登錄。
+測試使用專案內的暫存資料，涵蓋取消卸載、保留 app、限制刪除範圍、拒絕 junction、保留隱藏 metadata、SHA-256 / 安裝檔檢查、批次檔參數與錯誤碼，以及編譯失敗處理。編譯結果處理使用 native stub，未執行實際 Zephyr 編譯；測試不安裝／移除系統工具，也不寫入使用者登錄。
 
 完整驗收還需要：在線上機器完成安裝及編譯、產生 ZIP，再於沒有相關工具且斷網的 Windows x64 機器解壓縮安裝與編譯。隔離測試通過不代表上述完整驗收已完成。
 
