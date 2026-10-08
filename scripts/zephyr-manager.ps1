@@ -30,6 +30,13 @@ $Tools = @(
     @{ Id = 'oss-winget.dtc'; Name = 'dtc'; Extension = '.zip'; Type = 'zip' }
 )
 
+function Set-ConsoleUtf8 {
+    # Native UTF-8 output (including WinGet) must be decoded with UTF-8 in PS 5.1.
+    $utf8 = New-Object Text.UTF8Encoding($false)
+    [Console]::OutputEncoding = $utf8
+    $script:OutputEncoding = $utf8
+}
+
 function Invoke-Checked([string]$Exe, [string[]]$Arguments) {
     & $Exe @Arguments | Out-Host
     if ($LASTEXITCODE -ne 0) { throw "$Exe failed (exit $LASTEXITCODE)." }
@@ -265,7 +272,10 @@ function Copy-InstallerPackage {
         }
         if (Test-Path -LiteralPath $destination -PathType Container) { throw "Installer file path is a directory: $destination" }
         Assert-NoLinks $destination
-        New-Item -ItemType Directory -Path $parent -Force | Out-Null
+        # Windows PowerShell cannot create an already existing drive root.
+        if (-not (Test-Path -LiteralPath $parent -PathType Container)) {
+            New-Item -ItemType Directory -Path $parent -Force | Out-Null
+        }
         Copy-Item -LiteralPath (Join-Path $PackageRoot $relative) -Destination $destination -Force
     }
 }
@@ -583,7 +593,9 @@ function Open-DevelopmentShell {
     Invoke-Checked 'cmd.exe' @('/k')
 }
 
+$originalOutputEncoding = [Console]::OutputEncoding
 try {
+    Set-ConsoleUtf8
     if (-not [Environment]::Is64BitProcess -or $env:PROCESSOR_ARCHITECTURE -ne 'AMD64') { throw 'Run on Windows x64 using 64-bit PowerShell.' }
     if ($InstallDir -and $Mode -ne 'Online') { throw '-InstallDir applies to online installation only. Run the other launchers from the selected installation directory.' }
     if ($Mode -notin @('Uninstall', 'Online') -and $Root -match '\s') { throw 'Move this project to a path without spaces before installation or packaging.' }
@@ -597,3 +609,6 @@ try {
     }
     exit 0
 } catch { Write-Host "[ERROR] $($_.Exception.Message)" -ForegroundColor Red; exit 1 }
+finally {
+    [Console]::OutputEncoding = $originalOutputEncoding
+}

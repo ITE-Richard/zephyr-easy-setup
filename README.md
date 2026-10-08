@@ -36,6 +36,7 @@ zephyr-easy-setup.bat -InstallDir D:\
 ```powershell
 Set-Location D:\github\zephyr-easy-setup
 .\zephyr-easy-setup.bat -InstallDir D:\zephyr
+.\zephyr-easy-setup.bat -InstallDir D:\
 ```
 
 選擇其他安裝根目錄時，腳本會將安裝、打包、卸載、開發終端機入口、共用腳本、README 與測試複製到該目錄，供之後使用。請從選定目錄執行 `zephyr-env.cmd`、`zephyr-pack-offline.bat` 或 `zephyr-uninstall.bat`，才能操作該安裝。現有 `zephyrproject\app` 會保留。
@@ -43,6 +44,8 @@ Set-Location D:\github\zephyr-easy-setup
 安裝根目錄可以是 `D:\zephyr` 等資料夾，也可以直接是磁碟根目錄 `D:\`。例如 `-InstallDir D:\` 的工作區就是 `D:\zephyrproject`；`-InstallDir D:\zephyr` 的工作區則是 `D:\zephyr\zephyrproject`。路徑不能包含空白或 junction / symlink。
 
 安裝流程：安裝並檢查 Python、Git、CMake、7-Zip、Ninja、dtc、gperf；整理主機工具 PATH；啟用 Git 長路徑；建立 `zephyrproject\.venv`；安裝 west；執行 `west init`、`west update`；安裝 Zephyr 與模組 Python 依賴；下載指定 SDK 工具鏈；註冊 CMake；建立並編譯 `app\blinky`。
+
+執行期間會將終端機與外部程式管線設為 UTF-8，處理 WinGet 中文輸出的亂碼；結束時恢復原本的終端機編碼。
 
 SDK 使用 `west sdk install -b <workspace> -t <toolchain>`，安裝到 `zephyr-sdk-<version>` 子目錄。若 west 重用其他位置的既有 SDK，腳本會尋找並記錄該 SDK；卸載時只清理本專案內的 SDK。
 
@@ -224,7 +227,7 @@ zephyr-easy-setup/
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\verify-workflows.ps1
 ```
 
-測試使用專案內的暫存資料，涵蓋取消卸載、保留 app、限制刪除範圍、拒絕 junction、保留隱藏 metadata、SHA-256 / 安裝檔檢查、批次檔參數與錯誤碼，以及編譯失敗處理。編譯結果處理使用 native stub，未執行實際 Zephyr 編譯；測試不安裝／移除系統工具，也不寫入使用者登錄。
+測試使用專案內的暫存資料，涵蓋取消卸載、保留 app、限制刪除範圍、拒絕 junction、保留隱藏 metadata、SHA-256 / 安裝檔檢查、批次檔參數與錯誤碼、磁碟根目錄選擇與入口複製、中文 UTF-8 外部程式輸出，以及編譯失敗處理。磁碟根目錄的複製測試攔截寫入操作，不在真正的磁碟根目錄建立檔案。編譯結果處理使用 native stub，未執行實際 Zephyr 編譯；測試不安裝／移除系統工具，也不寫入使用者登錄。
 
 完整驗收還需要：在線上機器完成安裝及編譯、產生 ZIP，再於沒有相關工具且斷網的 Windows x64 機器解壓縮安裝與編譯。隔離測試通過不代表上述完整驗收已完成。
 

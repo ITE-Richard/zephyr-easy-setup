@@ -149,10 +149,31 @@ exit 9
     Add-Type -TypeDefinition @'
 public static class BuildExitStub {
     public static int Main(string[] args) {
+        if (args.Length > 0 && args[0] == "--utf8-output") {
+            byte[] bytes = System.Text.Encoding.UTF8.GetBytes("\u6b63\u5728\u5b89\u88dd\n");
+            System.Console.OpenStandardOutput().Write(bytes, 0, bytes.Length);
+            return 0;
+        }
         return System.Environment.GetEnvironmentVariable("ZEPHYR_TEST_BUILD_SUCCESS") == "1" ? 0 : 8;
     }
 }
 '@ -OutputAssembly "$Workspace\.venv\Scripts\python.exe" -OutputType ConsoleApplication
+    $savedOutputEncoding = [Console]::OutputEncoding
+    $savedPipeEncoding = $OutputEncoding
+    try {
+        $expectedText = -join ([char[]]@(0x6b63, 0x5728, 0x5b89, 0x88dd))
+        [Console]::OutputEncoding = [Text.Encoding]::GetEncoding(950)
+        $garbled = @(& "$Workspace\.venv\Scripts\python.exe" --utf8-output)
+        Assert ($garbled.Count -eq 1 -and $garbled[0] -cne $expectedText) 'Legacy-code-page reproduction did not corrupt native UTF-8 output.'
+        Set-ConsoleUtf8
+        Assert ([Console]::OutputEncoding.CodePage -eq 65001 -and $OutputEncoding.CodePage -eq 65001) 'Console and pipe encodings do not agree.'
+        $decoded = @(& "$Workspace\.venv\Scripts\python.exe" --utf8-output)
+        Assert ($LASTEXITCODE -eq 0 -and $decoded.Count -eq 1 -and $decoded[0] -ceq $expectedText) 'Native Chinese UTF-8 output is still garbled.'
+    } finally {
+        [Console]::OutputEncoding = $savedOutputEncoding
+        $OutputEncoding = $savedPipeEncoding
+    }
+    Write-Host '[PASS] Native Chinese UTF-8 output is decoded correctly after legacy-code-page reproduction.'
     function Invoke-Checked([string]$Exe, [string[]]$Arguments) { }
     $settings = [pscustomobject]@{ Board = 'it51xxx_evb'; Qualifier = 'it51xxx_evb/it51526aw'; Toolchain = 'riscv64-zephyr-elf' }
     New-Item -ItemType Directory -Path "$Workspace\app\blinky" -Force | Out-Null
@@ -202,6 +223,33 @@ public static class BuildExitStub {
     $output = @(& cmd.exe /c (Join-Path $projectRoot 'zephyr-easy-setup.bat') -InstallDir $driveRoot -CheckOnly)
     Assert ($LASTEXITCODE -eq 0) 'Actual launcher rejected the drive-root installation path.'
     Assert (($output -join "`n").Contains("Zephyr workspace:       $Workspace")) 'Actual launcher reported a wrong drive-root workspace.'
+    # Exercise the actual copy function with writes captured in this child scope.
+    # Treat destination children as absent, without touching the real drive root.
+    & {
+        $copied = New-Object 'System.Collections.Generic.List[string]'
+        $created = New-Object 'System.Collections.Generic.List[string]'
+        function Test-Path([string]$LiteralPath, [string]$PathType) {
+            if ($LiteralPath -eq $driveRoot) { return $true }
+            if ($LiteralPath.StartsWith($projectRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
+                return Microsoft.PowerShell.Management\Test-Path -LiteralPath $LiteralPath -PathType Leaf
+            }
+            return $false
+        }
+        function Assert-NoLinks([string]$Path) { }
+        function New-Item([string]$ItemType, [string]$Path, [switch]$Force) {
+            Assert ($Path -ne $driveRoot) 'Copy attempted to create the existing drive root.'
+            $created.Add($Path)
+        }
+        function Copy-Item([string]$LiteralPath, [string]$Destination, [switch]$Force) {
+            $copied.Add($Destination)
+        }
+        Copy-InstallerPackage
+        Assert ($copied.Count -eq 8) 'Drive-root package copy did not process all files.'
+        Assert ($copied.Contains((Join-Path $driveRoot 'zephyr-easy-setup.bat'))) 'Drive-root launcher destination changed.'
+        Assert ($created.Contains((Join-Path $driveRoot 'scripts'))) 'Missing helper directory was not created.'
+        Assert ($created.Contains((Join-Path $driveRoot 'tests'))) 'Missing test directory was not created.'
+    }
+    Write-Host '[PASS] Drive-root package copy skips root creation and prepares helper directories.'
     Write-Host '[PASS] Drive-root selection keeps absolute paths, owned tools and complete bundle paths.'
     $InstallDir = "$fixtureRoot\path with spaces"
     Expect-Failure { Select-InstallDirectory } '*must not contain spaces*'
