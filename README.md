@@ -1,205 +1,170 @@
-# Zephyr RTOS One-Click Automated Setup for Windows
+# Zephyr RTOS One-Click Setup for Windows
 
-一個適用於 Windows 10 / 11 的 Zephyr RTOS 一鍵全自動化安裝與開發環境配置腳本。
+此專案提供 Windows 上的一鍵線上安裝、既有環境離線打包、離線安裝與確認後卸載。預設板卡為 `it51xxx_evb`，失敗時嘗試 `it51xxx_evb/it51526aw`，工具鏈為 `riscv64-zephyr-elf`。
 
-本工具能自動透過 Windows 套件管理器（`winget`）安裝所有主機端工具依賴、建立隔離的 Python 虛擬環境、初始化 Zephyr 工作區與相依倉庫、下載對應架構的 Zephyr SDK 工具鏈，並編譯驗證範例專案。
+所有 `.bat` 入口共用 `scripts/zephyr-manager.ps1`，必要步驟失敗時回傳 exit code 1；只有安裝及 Blinky 編譯都成功，才會顯示安裝完成。
 
-預設針對 **ITE IT51xxx 系列（RISC-V EC，如 `it51xxx_evb` / `it51526aw`）** 提供開箱即用的完整支援，同時支援自訂目標板卡與架構。
+## 系統需求
 
----
+- Windows 10 / 11 **x64**，64 位元 Windows PowerShell 5.1。
+- 專案、來源工作區與解壓縮路徑不含空白，例如 `D:\zephyr-easy-setup`。
+- 使用 **Python 3.12 x64**；離線 wheels 固定給相同 Python 次版本與平台使用。
+- 線上安裝與首次補齊離線安裝檔需要網路及支援 `winget download` 的 WinGet。
+- 需有容納來源、wheels、SDK、暫存副本及 ZIP 的磁碟空間，通常為數 GB 以上。
+- CMake、Git、7-Zip 安裝可能需要系統管理員權限；在乾淨目標電腦上可從系統管理員命令提示字元執行安裝。移除使用者環境設定時，請使用原安裝者的帳號。
 
-## 📑 目錄
-
-- [特色功能](#特色功能)
-- [系統需求](#系統需求)
-- [快速開始](#快速開始)
-- [日常開發流程（推薦）](#日常開發流程推薦)
-- [自訂板卡與工具鏈參數](#自訂板卡與工具鏈參數)
-- [離線打包與跨電腦快速遷移（Air-gapped / Offline）](#離線打包與跨電腦快速遷移air-gapped--offline)
-- [專案目錄結構](#專案目錄結構)
-- [乾淨卸載](#乾淨卸載)
-- [常見問題與排查（Troubleshooting）](#常見問題與排查troubleshooting)
-
-
----
-
-## ✨ 特色功能
-
-1. **一鍵全自動配置**：從無到有全自動完成，包含 CMake、Ninja、Git、Python 3.12、7-Zip、Devicetree Compiler (dtc)、gperf 等。
-2. **無污染環境隔離**：Zephyr 與 west Python 套件皆安裝於獨立的 `.venv` 虛擬環境中，不污染全域 Python。
-3. **自動註冊與持久化**：自動配置 Windows 使用者 PATH、啟用 Git Long Paths、註冊 Zephyr SDK 至 CMake 套件清單，並持久化 `ZEPHYR_SDK_INSTALL_DIR`。
-4. **內建日常開發啟動器**：附帶 `zephyr-env.cmd`，雙擊即可開啟已配置好環境的開發終端機。
-5. **安全與模組化**：預設編譯並驗證 Blinky 範例，確保安裝完成即可直接產生韌體映像檔（`zephyr.bin`）。
-
----
-
-## 💻 系統需求
-
-* **作業系統**：Windows 10 (1809 以上) 或 Windows 11 (64-bit)。
-* **Windows 應用程式安裝程式（Winget）**：
-  * Windows 11 通常已內建。
-  * 若無 `winget`，請至 Microsoft Store 安裝 [應用程式安裝程式 (App Installer)](https://aka.ms/getwinget)。
-* **網路連線**：安裝期間需下載約 1~2 GB 的相依工具、Git 倉庫與 SDK。
-
----
-
-## 🚀 快速開始
-
-### 1. 複製專案
-```bash
-git clone https://github.com/ITE-Richard/zephyr-easy-setup.git
-cd zephyr-easy-setup
-```
-
-### 2. 執行一鍵安裝腳本
-直接**雙擊執行** `zephyr-easy-setup.bat`，或在命令提示字元中執行：
+## 一鍵線上安裝
 
 ```cmd
+git clone https://github.com/ITE-Richard/zephyr-easy-setup.git
+cd zephyr-easy-setup
 zephyr-easy-setup.bat
 ```
 
-腳本將會自動依序執行以下 10 個步驟：
-1. **[Step 1/10]** 檢測 `winget` 套件管理器。
-2. **[Step 2/10]** 透過 winget 安裝 CMake, Ninja, Python 3.12, Git, 7-Zip, gperf, dtc。
-3. **[Step 3/10]** 整理並持久化系統與使用者 PATH，啟用 Git 長路徑支援（`core.longpaths`）。
-4. **[Step 4/10]** 檢測並綁定 Python 3.12 執行檔。
-5. **[Step 5/10]** 建立 `zephyrproject\.venv` 虛擬環境並安裝 `west`。
-6. **[Step 6/10]** 初始化 Zephyr 工作區並同步程式碼（`west update`）。
-7. **[Step 7/10]** 安裝 Zephyr Python 依賴並執行 `west zephyr-export`。
-8. **[Step 8/10]** 安裝 Zephyr SDK 工具鏈（預設 `riscv64-zephyr-elf`）並向 CMake 註冊。
-9. **[Step 9/10]** 建立 `zephyrproject\app\blinky` 專案目錄。
-10. **[Step 10/10]** 編譯 Blinky 韌體，成功產出 `build\zephyr\zephyr.bin`。
+安裝流程：安裝並檢查 Python、Git、CMake、7-Zip、Ninja、dtc、gperf；整理主機工具 PATH；啟用 Git 長路徑；建立 `zephyrproject\.venv`；安裝 west；執行 `west init`、`west update`；安裝 Zephyr 與模組 Python 依賴；下載指定 SDK 工具鏈；註冊 CMake；建立並編譯 `app\blinky`。
 
----
+SDK 使用 `west sdk install -b <workspace> -t <toolchain>`，安裝到 `zephyr-sdk-<version>` 子目錄。若 west 重用其他位置的既有 SDK，腳本會尋找並記錄該 SDK；卸載時只清理本專案內的 SDK。
 
-## 🛠 日常開發流程（推薦）
+主機工具目錄會補入使用者 PATH。SDK 與 `.venv` 由開發終端機載入，避免新終端機誤用另一個工作區的工具鏈。
 
-安裝完成後，日常進行專案開發時**不需要重新執行 setup 腳本**：
+### 自訂板卡、工具鏈與版本
 
-1. **直接雙擊執行 `zephyr-env.cmd`**：
-   此腳本會自動為您啟動終端機、載入 Python 虛擬環境、設定 SDK 變數並切換至 `zephyrproject\`。
-
-2. **常用編譯指令**：
-   ```cmd
-   :: 切換至應用程式目錄
-   cd app\blinky
-
-   :: 一般編譯
-   west build -p always -b it51xxx_evb
-
-   :: 若使用限定 Qualifier 目標
-   west build -p always -b it51xxx_evb/it51526aw
-
-   :: 清理編譯快取
-   west build -t clean
-   ```
-
----
-
-## ⚙️ 自訂板卡與工具鏈參數
-
-`zephyr-easy-setup.bat` 支援透過命令列傳入自訂參數：
-
-### 參數格式
 ```cmd
 zephyr-easy-setup.bat [BOARD] [BOARD_QUALIFIER] [SDK_TOOLCHAIN] [ZEPHYR_REVISION]
+
+zephyr-easy-setup.bat stm32f4_disco "" arm-zephyr-eabi
+zephyr-easy-setup.bat it51xxx_evb it51xxx_evb/it51526aw riscv64-zephyr-elf v4.1.0
 ```
 
-### 範例
+自訂 BOARD 而未提供 QUALIFIER 時，不會套用 ITE 的 qualifier。板卡、qualifier 與工具鏈保存在 `.zephyr-setup.json`，供後續離線打包及安裝使用。REVISION 只用於建立新工作區；既有工作區不會自動切換版本。
 
-* **預設行為（ITE IT51xxx 系列）**：
-  ```cmd
-  zephyr-easy-setup.bat it51xxx_evb it51xxx_evb/it51526aw riscv64-zephyr-elf
-  ```
+自動 SDK 安裝需要所選 Zephyr 提供 `west sdk`。對於沒有該指令的舊版本，先準備相容的 SDK，再使用共用 PowerShell 入口指定它：
 
-* **配置給 ARM 架構板卡（例如 STM32F4 Discovery）**：
-  ```cmd
-  zephyr-easy-setup.bat stm32f4_disco "" arm-zephyr-eabi
-  ```
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\zephyr-manager.ps1 -Mode Online -Revision v3.7.0 -SdkPath D:\sdk\zephyr-sdk-0.16.8
+```
 
-* **指定 Zephyr 穩定發行版本（如 v3.7.0）**：
-  ```cmd
-  zephyr-easy-setup.bat it51xxx_evb it51xxx_evb/it51526aw riscv64-zephyr-elf v3.7.0
-  ```
+Blinky 需要板卡支援其 GPIO / LED 配置；不支援的板卡會回報驗證失敗。
 
----
+## 日常開發
 
-## 📦 離線打包與跨電腦快速遷移（Air-gapped / Offline）
+雙擊 `zephyr-env.cmd`，它會讀取本工作區設定、載入 `.venv` 和 SDK，並開啟 cmd 終端機。常用指令：
 
-若需要將已安裝好的環境搬移到**無外網連線（隔離網段/無聯網機台）**或其他開發電腦，無需重新下載數 GB 的檔案，可使用專案提供的離線打包工具：
+```cmd
+cd app\blinky
+west build -p always -b it51xxx_evb/it51526aw
+west build -t clean
+```
 
-### 1. 在原電腦（電腦 A）進行打包
-在已執行過 `zephyr-easy-setup.bat` 且安裝完成的電腦上，直接執行：
+## 打包目前已下載的環境
+
+安裝完成後執行：
+
 ```cmd
 zephyr-pack-offline.bat
 ```
-腳本將會自動：
-1. 緩存所有 Python 離線 Wheels 套件（`west` 與所有 Zephyr requirements）。
-2. 下載所有主機工具離線安裝檔（CMake, Python 3.12, Git, 7-Zip, Ninja, dtc, gperf）。
-3. 自動清理中間編譯快取（`build/`）以大幅降低壓縮檔大小。
-4. 將所有內容、原始碼倉庫與已安裝的 Zephyr SDK 打包成 **`zephyr-offline-bundle.zip`**。
 
-### 2. 複製至目標電腦（電腦 B）進行解壓縮與安裝
-1. 將產生的 `zephyr-offline-bundle.zip` 複製到目標電腦。
-2. 解壓縮至**不含空格**的路徑（例如 `D:\zephyr`）。
-3. 進入解壓縮目錄，**雙擊執行**：
-   ```cmd
-   zephyr-offline-install.bat
-   ```
-4. 腳本將在 **100% 離線環境** 下自動：
-   * 安裝或辨識本機工具（Python, Git, CMake, 7-Zip, Ninja, dtc, gperf）。
-   * 配置系統與使用者環境變數。
-   * 從離線 wheels 建立乾淨的 `.venv` 虛擬環境。
-   * 向 CMake 註冊 Zephyr SDK。
-   * 編譯 Blinky 範例進行全功能驗證！
+也可以直接從其他既有工作區打包，不必重新下載 Zephyr 程式碼或 SDK：
 
----
+```cmd
+zephyr-pack-offline.bat -SourceWorkspace D:\existing\zephyrproject -SdkPath D:\sdk\zephyr-sdk-0.17.0
+```
 
-## 📁 專案目錄結構
+來源必須包含完整 west 工作區（`.west`、Zephyr 與啟用的模組 Git 倉庫）、Python 3.12 x64 的 `.venv`，以及已解壓縮且包含目標 GCC 的 SDK。SDK 不在工作區內或有多個候選版本時，可用 `-SdkPath` 明確指定。來源沒有設定檔時使用 ITE 預設值；其他板卡請加上 `-Board`、`-Qualifier`、`-Toolchain`。
+
+打包會：
+
+1. 讀取來源 `.venv` 的 `pip freeze --all`，固定目前實際套件版本，下載可直接安裝的 wheels。
+2. 重用 `installers\tools\<package-id>` 中的安裝檔；缺少時透過 WinGet 下載 x64 EXE、MSI 或 ZIP。
+3. 在乾淨的暫存 `.venv` 使用 `--no-index` 安裝全部固定版本、執行 `pip check`，並驗證 Zephyr / 模組 requirements。
+4. 複製程式碼、`.west`、`.git`、SDK、安裝檔及安裝／卸載腳本到暫存目錄。只在副本排除來源 `.venv` 與 `app\blinky\build`，保留其他檔案與來源編譯結果。
+5. 建立逐檔 SHA-256 的 `bundle-manifest.json`，使用 7-Zip 壓縮並測試 ZIP。成功後才替換 `zephyr-offline-bundle.zip`。
+
+**已安裝的工具不等於仍保留安裝檔。** 若原電腦沒有 Python、Git 等離線安裝程式或缺少 wheels，首次打包需連網補齊。已有完整快取時可以強制只使用本地內容：
+
+```cmd
+zephyr-pack-offline.bat -CacheOnly
+```
+
+快取的目錄格式如下，每個工具目錄應只有一個符合副檔名的安裝檔（WinGet 產生的 YAML 可以保留）：
+
+```text
+installers/
+  requirements-frozen.txt
+  wheels/*.whl
+  tools/Python.Python.3.12/*.exe
+  tools/Git.Git/*.exe
+  tools/Kitware.CMake/*.msi
+  tools/7zip.7zip/*.exe
+  tools/Ninja-build.Ninja/*.zip
+  tools/oss-winget.gperf/*.zip
+  tools/oss-winget.dtc/*.zip
+```
+
+wheel 不可取得、SDK / 模組不完整、local / editable Python dependency、外部 Git objects、Git worktree 或 junction / symlink 都會中止打包，避免產生無法搬移的套件。來源內含使用者 app 與 Git 歷史，請依實際需求分享 ZIP。
+
+## 完全離線安裝
+
+將 `zephyr-offline-bundle.zip` 完整解壓縮到目標電腦，例如 `D:\zephyr`，執行：
+
+```cmd
+zephyr-offline-install.bat
+```
+
+安裝前會檢查 manifest、SHA-256 與必要檔案，接著安裝或辨識主機工具、解壓縮 portable tools、建立新的 `.venv`、從固定版本 wheels 安裝 Python 套件、註冊 Zephyr / SDK 並編譯 Blinky。此流程不執行 `winget install`、`west update` 或 `west sdk install`，pip 使用 `--isolated --no-index`。
+
+可先只檢查離線包：
+
+```cmd
+zephyr-offline-install.bat -CheckOnly
+```
+
+可用 `-Board`、`-Qualifier`、`-Toolchain` 覆寫目標；SDK 必須已包含對應工具鏈。安裝程式若要求重新啟動，腳本會停止，重啟後再執行。卸載後要重新離線安裝時，請重新解壓縮完整 ZIP。
+
+## 確認後卸載
+
+```cmd
+zephyr-uninstall.bat
+```
+
+開始移除前會詢問：
+
+```text
+Remove this Zephyr installation? (y/N):
+Also uninstall shared Python, Git, CMake, Ninja, dtc, gperf and 7-Zip? (y/N):
+```
+
+第一題只有 `y`（不分大小寫）會繼續；直接 Enter、N 或其他輸入都取消且不變更檔案。第二題預設保留共用工具；選 y 時使用 WinGet 移除列出的工具，可能影響其他開發專案，且需要目標電腦有可用的 WinGet。
+
+卸載會保留 `zephyrproject\app` 原位，移除本專案 `zephyrproject` 下的其餘內容及本地 portable tools，只清理指向本工作區的使用者環境設定與 CMake 登錄。遇到 junction / symlink 會在刪除前停止。`installers`、離線 ZIP、其他位置的工作區與 SDK 都保留。卸載失敗會回傳 exit code 1，不會顯示完整成功。
+
+## 專案結構
 
 ```text
 zephyr-easy-setup/
-├── zephyr-easy-setup.bat     # 一鍵線上全自動安裝與環境建置腳本
-├── zephyr-pack-offline.bat   # 離線打包工具（打包目前已裝好之所有工具、代碼與 SDK）
-├── zephyr-offline-install.bat# 離線安裝腳本（在目標電腦雙擊即可完全離線復原環境）
-├── zephyr-env.cmd            # 日常開發終端機啟動器（雙擊進入開發環境）
-├── zephyr-uninstall.bat      # 卸載與清理腳本（安全保留 app 目錄）
-├── README.md                 # 專案說明文件
-├── installers/               # [打包產出] 離線安裝檔與 Python Wheels（已被 git 忽略）
-└── zephyrproject/            # 自動產生之 Zephyr 工作區（已被 .gitignore 忽略）
-    ├── .venv/                # Python 虛擬環境
-    ├── .west/                # West 專案配置
-    ├── zephyr/               # Zephyr RTOS 核心原始碼
-    ├── zephyr-sdk-<version>/ # Zephyr SDK 與編譯工具鏈
-    └── app/                  # 使用者應用程式目錄（建議程式碼放置於此）
-        └── blinky/           # 範例測試專案
+  zephyr-easy-setup.bat       線上安裝
+  zephyr-pack-offline.bat     打包來源工作區
+  zephyr-offline-install.bat  離線安裝
+  zephyr-uninstall.bat        確認後卸載
+  zephyr-env.cmd              開發終端機
+  scripts/zephyr-manager.ps1  共用流程與錯誤檢查
+  tests/verify-workflows.ps1  隔離驗證
+  installers/                離線安裝快取（Git 忽略）
+  offline_bundle/            打包暫存（Git 忽略）
+  tools/                     portable tools（Git 忽略）
+  zephyrproject/             工作區（Git 忽略）
 ```
 
----
+## 驗證
 
-## 🗑 乾淨卸載
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\verify-workflows.ps1
+```
 
-若需要清理本專案或重新安裝：
+測試使用專案內的暫存資料，涵蓋取消卸載、保留 app、限制刪除範圍、拒絕 junction、保留隱藏 metadata、SHA-256 / 安裝檔檢查及批次檔錯誤碼。測試不安裝／移除系統工具，也不寫入使用者登錄。
 
-* 執行 `zephyr-uninstall.bat`。
-* 此腳本會將 `zephyrproject\app\` 應用程式程式碼備份保留，清理其餘 Zephyr 源碼、虛擬環境與 CMake 註冊表。
+完整驗收還需要：在線上機器完成安裝及編譯、產生 ZIP，再於沒有相關工具且斷網的 Windows x64 機器解壓縮安裝與編譯。隔離測試通過不代表上述完整驗收已完成。
 
----
+自動化執行時，可設定 `ZEPHYR_NO_PAUSE=1` 省略批次檔最後的 pause；卸載的 y/N 確認仍會保留。
 
-## ❓ 常見問題與排查（Troubleshooting）
-
-### Q1: `winget` 提示找不到命令？
-* 請確認 Windows 已啟用「應用程式安裝程式」。
-* 可手動將 `%LocalAppData%\Microsoft\WindowsApps` 加入使用者環境變數 `PATH`。
-
-### Q2: 出現路徑過長（Filename too long / Path too long）錯誤？
-* 腳本已預先配置 `git config --global core.longpaths true`。
-* 建議在 Windows 系統中啟用長路徑支援：
-  1. 按 `Win + R` 輸入 `regedit`。
-  2. 瀏覽至 `HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\FileSystem`。
-  3. 將 `LongPathsEnabled` 設為 `1`。
-
-### Q3: 重開終端機後 `west build` 報錯找不到工具鏈？
-* 請使用專案隨附的 `zephyr-env.cmd` 啟動終端機。
-* 若使用 VS Code，請確認 VS Code 的終端機已重啟，或在環境變數中確認 `ZEPHYR_SDK_INSTALL_DIR` 與 `ZEPHYR_TOOLCHAIN_VARIANT=zephyr` 已生效。
-
+參考：[Zephyr Getting Started](https://docs.zephyrproject.org/latest/develop/getting_started/)、[WinGet download](https://learn.microsoft.com/windows/package-manager/winget/download)、[SDK 安裝參數定義](https://github.com/zephyrproject-rtos/zephyr/blob/main/scripts/west_commands/sdk.py)。
