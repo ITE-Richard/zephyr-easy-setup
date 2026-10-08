@@ -22,6 +22,25 @@ cd zephyr-easy-setup
 zephyr-easy-setup.bat
 ```
 
+請保留完整專案資料夾，入口需要同一資料夾下的 `scripts\zephyr-manager.ps1`。使用 Release ZIP 時，先完整解壓縮再執行；缺少共用腳本時會顯示路徑與錯誤，不會自動下載補齊。
+
+啟動後會先詢問安裝根目錄，按 Enter 使用安裝腳本所在的專案資料夾。例如輸入 `D:\zephyr`，Zephyr 工作區會建立在 `D:\zephyr\zephyrproject`。也可以直接指定目錄，略過這個詢問：
+
+```cmd
+zephyr-easy-setup.bat -InstallDir D:\zephyr
+```
+
+在目前 checkout 的 PowerShell 中執行：
+
+```powershell
+Set-Location D:\github\zephyr-easy-setup
+.\zephyr-easy-setup.bat -InstallDir D:\zephyr
+```
+
+選擇其他安裝根目錄時，腳本會將安裝、打包、卸載、開發終端機入口、共用腳本、README 與測試複製到該目錄，供之後使用。請從選定目錄執行 `zephyr-env.cmd`、`zephyr-pack-offline.bat` 或 `zephyr-uninstall.bat`，才能操作該安裝。現有 `zephyrproject\app` 會保留。
+
+安裝根目錄須為磁碟下的資料夾，例如 `D:\zephyr`，不能直接選磁碟根目錄、包含空白的路徑或 junction / symlink。
+
 安裝流程：安裝並檢查 Python、Git、CMake、7-Zip、Ninja、dtc、gperf；整理主機工具 PATH；啟用 Git 長路徑；建立 `zephyrproject\.venv`；安裝 west；執行 `west init`、`west update`；安裝 Zephyr 與模組 Python 依賴；下載指定 SDK 工具鏈；註冊 CMake；建立並編譯 `app\blinky`。
 
 SDK 使用 `west sdk install -b <workspace> -t <toolchain>`，安裝到 `zephyr-sdk-<version>` 子目錄。若 west 重用其他位置的既有 SDK，腳本會尋找並記錄該 SDK；卸載時只清理本專案內的 SDK。
@@ -30,10 +49,10 @@ SDK 使用 `west sdk install -b <workspace> -t <toolchain>`，安裝到 `zephyr-
 
 ### 安裝位置
 
-工作區固定在腳本所在專案的 `zephyrproject` 子目錄，不隨啟動命令時的工作目錄改變。目前專案位於 `D:\github\zephyr-easy-setup`，因此預設配置如下：
+工作區固定在所選安裝根目錄的 `zephyrproject` 子目錄。未指定 `-InstallDir` 時先顯示目錄詢問；按 Enter 的預設值為安裝腳本所在的專案目錄，不隨啟動命令時的工作目錄改變。目前 checkout 的預設工作區是 `D:\github\zephyr-easy-setup\zephyrproject`；若選擇 `D:\zephyr`，配置如下：
 
 ```text
-D:\github\zephyr-easy-setup\zephyrproject\
+D:\zephyr\zephyrproject\
   zephyr\                    Zephyr 原始碼
   modules\                   west manifest 指定的相依模組
   .west\                     west 工作區設定
@@ -44,7 +63,7 @@ D:\github\zephyr-easy-setup\zephyrproject\
   app\blinky\build\zephyr\   範例編譯輸出
 ```
 
-相依倉庫的實際子目錄由所選 Zephyr 的 west manifest 決定。若專案搬到其他位置，工作區也會跟隨腳本位置改變。重用的外部 SDK 保留在原位置；設定檔的 `SdkDirectory` 對本工作區 SDK 使用相對路徑，對外部 SDK 使用絕對路徑。
+相依倉庫的實際子目錄由所選 Zephyr 的 west manifest 決定。搬移完整安裝資料夾後，從其中的入口執行時，工作區會跟隨該資料夾位置。重用的外部 SDK 保留在原位置；設定檔的 `SdkDirectory` 對本工作區 SDK 使用相對路徑，對外部 SDK 使用絕對路徑。
 
 Python、Git、CMake、7-Zip 等主機工具由 WinGet 安裝到各自的 Windows 安裝目錄，實際位置依套件與安裝範圍而定。離線安裝時，Ninja、dtc、gperf 則解壓縮到本專案的 `tools\<工具名稱>`，其可執行檔目錄會加入 PATH。
 
@@ -52,10 +71,14 @@ Python、Git、CMake、7-Zip 等主機工具由 WinGet 安裝到各自的 Window
 
 ```cmd
 zephyr-easy-setup.bat [BOARD] [BOARD_QUALIFIER] [SDK_TOOLCHAIN] [ZEPHYR_REVISION]
+zephyr-easy-setup.bat -InstallDir <DIRECTORY> [-Board <BOARD>] [-Qualifier <QUALIFIER>] [-Toolchain <TOOLCHAIN>] [-Revision <REVISION>]
 
 zephyr-easy-setup.bat stm32f4_disco "" arm-zephyr-eabi
 zephyr-easy-setup.bat it51xxx_evb it51xxx_evb/it51526aw riscv64-zephyr-elf v4.1.0
+zephyr-easy-setup.bat -InstallDir D:\zephyr-arm -Board stm32f4_disco -Toolchain arm-zephyr-eabi
 ```
+
+使用具名參數時，`-InstallDir` 放在批次檔參數的第一個位置。舊的板卡位置參數仍可使用，執行時會詢問安裝根目錄。若只要檢查所選安裝路徑，可以執行 `zephyr-easy-setup.bat -InstallDir D:\zephyr -CheckOnly`；它不複製檔案或安裝工具。
 
 明確提供 BOARD 時，會先清除既有 qualifier；只有同時提供 QUALIFIER 才重新設定。未提供的板卡與工具鏈參數會沿用 `zephyrproject\.zephyr-setup.json`；沒有設定檔時才使用 ITE 預設值。該設定檔供後續離線打包及安裝使用。REVISION 只用於建立新工作區；若既有 `.west` 工作區仍傳入 REVISION，腳本會回報錯誤，不會切換版本。
 
@@ -202,6 +225,6 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\verify-workflows.p
 
 完整驗收還需要：在線上機器完成安裝及編譯、產生 ZIP，再於沒有相關工具且斷網的 Windows x64 機器解壓縮安裝與編譯。隔離測試通過不代表上述完整驗收已完成。
 
-自動化執行時，可設定 `ZEPHYR_NO_PAUSE=1` 省略批次檔最後的 pause；卸載的 y/N 確認仍會保留。
+自動化執行時，可設定 `ZEPHYR_NO_PAUSE=1` 省略批次檔最後的 pause；線上安裝請同時指定 `-InstallDir` 以略過目錄詢問。卸載的 y/N 確認仍會保留。
 
 參考：[Zephyr Getting Started](https://docs.zephyrproject.org/latest/develop/getting_started/)、[WinGet download](https://learn.microsoft.com/windows/package-manager/winget/download)、[SDK 安裝參數定義](https://github.com/zephyrproject-rtos/zephyr/blob/main/scripts/west_commands/sdk.py)。

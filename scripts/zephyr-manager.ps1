@@ -2,13 +2,15 @@
 param(
     [ValidateSet('Online', 'Pack', 'Offline', 'Uninstall', 'Shell')][string]$Mode,
     [string]$SourceWorkspace, [string]$SdkPath,
+    [string]$InstallDir,
     [string]$Board, [string]$Qualifier, [string]$Toolchain, [string]$Revision,
     [switch]$CacheOnly, [switch]$CheckOnly
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-$Root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..')).TrimEnd('\')
+$PackageRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..')).TrimEnd('\')
+$Root = $PackageRoot
 $Workspace = Join-Path $Root 'zephyrproject'
 $Cache = Join-Path $Root 'installers'
 $Tools = @(
@@ -203,7 +205,60 @@ function Complete-Setup($Settings, [string]$Sdk) {
     Write-Host 'Run zephyr-env.cmd to open the development shell.'
 }
 
+function Select-InstallDirectory {
+    $destination = $InstallDir
+    if (-not $destination) {
+        $default = $PackageRoot
+        if ($default.TrimEnd('\') -eq [IO.Path]::GetPathRoot($default).TrimEnd('\')) {
+            $default = Join-Path $default 'zephyr-easy-setup'
+        }
+        $answer = Read-Host "Installation directory [$default]"
+        $destination = $answer.Trim().Trim('"')
+        if (-not $destination) { $destination = $default }
+    }
+    $selected = [IO.Path]::GetFullPath($destination).TrimEnd('\')
+    if ($selected -eq [IO.Path]::GetPathRoot($selected).TrimEnd('\')) { throw 'Choose an installation folder below a drive root, for example D:\zephyr.' }
+    if ($selected -match '\s') { throw 'The installation directory must not contain spaces.' }
+    if (Test-Path -LiteralPath $selected -PathType Leaf) { throw "Installation directory is a file: $selected" }
+    # Inspect existing ancestors before writing through the selected path.
+    $ancestor = $selected
+    while ($ancestor) {
+        if (Test-Path -LiteralPath $ancestor) {
+            if ((Get-Item -LiteralPath $ancestor -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Linked installation path is not supported: $ancestor" }
+        }
+        $ancestor = Split-Path $ancestor -Parent
+    }
+    $script:Root = $selected
+    $script:Workspace = Join-Path $selected 'zephyrproject'
+    $script:Cache = Join-Path $selected 'installers'
+    Write-Host "Installation directory: $Root"
+    Write-Host "Zephyr workspace:       $Workspace"
+}
+
+function Copy-InstallerPackage {
+    if ($Root -ieq $PackageRoot) { return }
+    $files = @('zephyr-easy-setup.bat', 'zephyr-pack-offline.bat', 'zephyr-offline-install.bat', 'zephyr-uninstall.bat', 'zephyr-env.cmd', 'README.md', 'scripts\zephyr-manager.ps1', 'tests\verify-workflows.ps1')
+    foreach ($relative in $files) {
+        if (-not (Test-Path -LiteralPath (Join-Path $PackageRoot $relative) -PathType Leaf)) { throw "Incomplete installer package: $relative" }
+    }
+    foreach ($relative in $files) {
+        $destination = Assert-Within (Join-Path $Root $relative) $Root
+        $parent = Split-Path $destination
+        if (Test-Path -LiteralPath $parent) {
+            $item = Get-Item -LiteralPath $parent -Force
+            if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw "Invalid installer directory: $parent" }
+        }
+        if (Test-Path -LiteralPath $destination -PathType Container) { throw "Installer file path is a directory: $destination" }
+        Assert-NoLinks $destination
+        New-Item -ItemType Directory -Path $parent -Force | Out-Null
+        Copy-Item -LiteralPath (Join-Path $PackageRoot $relative) -Destination $destination -Force
+    }
+}
+
 function Install-Online {
+    Select-InstallDirectory
+    if ($CheckOnly) { Write-Host '[OK] Installation path check complete; no installation performed.'; return }
+    Copy-InstallerPackage
     $settings = Get-Settings $Workspace
     Refresh-Path
     foreach ($tool in $Tools) {
@@ -513,7 +568,8 @@ function Open-DevelopmentShell {
 
 try {
     if (-not [Environment]::Is64BitProcess -or $env:PROCESSOR_ARCHITECTURE -ne 'AMD64') { throw 'Run on Windows x64 using 64-bit PowerShell.' }
-    if ($Mode -ne 'Uninstall' -and $Root -match '\s') { throw 'Move this project to a path without spaces before installation or packaging.' }
+    if ($InstallDir -and $Mode -ne 'Online') { throw '-InstallDir applies to online installation only. Run the other launchers from the selected installation directory.' }
+    if ($Mode -notin @('Uninstall', 'Online') -and $Root -match '\s') { throw 'Move this project to a path without spaces before installation or packaging.' }
     switch ($Mode) {
         'Online' { Install-Online }
         'Pack' { New-Bundle }

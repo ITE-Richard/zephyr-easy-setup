@@ -127,8 +127,8 @@ try {
     # Verify legacy online positional parameters without running installers.
     Copy-Item -LiteralPath (Join-Path $projectRoot 'zephyr-easy-setup.bat') -Destination $Root
     @'
-param([string]$Mode, [string]$Board, [string]$Qualifier, [string]$Toolchain, [string]$Revision)
-@{Mode=$Mode;Board=$Board;Qualifier=$Qualifier;Toolchain=$Toolchain;Revision=$Revision} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $PSScriptRoot 'arguments.json')
+param([string]$Mode, [string]$Board, [string]$Qualifier, [string]$Toolchain, [string]$Revision, [string]$InstallDir, [switch]$CheckOnly)
+@{Mode=$Mode;Board=$Board;Qualifier=$Qualifier;Toolchain=$Toolchain;Revision=$Revision;InstallDir=$InstallDir;CheckOnly=[bool]$CheckOnly} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $PSScriptRoot 'arguments.json')
 exit 9
 '@ | Set-Content -LiteralPath "$Root\scripts\zephyr-manager.ps1" -Encoding ASCII
     & cmd.exe /c "$Root\zephyr-easy-setup.bat" | Out-Host
@@ -137,6 +137,10 @@ exit 9
     Assert ($LASTEXITCODE -eq 9) 'Custom online wrapper lost exit status.'
     $arguments = Get-Content -LiteralPath "$Root\scripts\arguments.json" -Raw | ConvertFrom-Json
     Assert ($arguments.Board -eq 'stm32f4_disco' -and $arguments.Qualifier -eq '' -and $arguments.Toolchain -eq 'arm-zephyr-eabi' -and $arguments.Revision -eq 'v4.1.0') 'Positional arguments changed.'
+    & cmd.exe /c "$Root\zephyr-easy-setup.bat" -InstallDir "$Root\custom-install" -Board stm32f4_disco -Toolchain arm-zephyr-eabi -CheckOnly | Out-Host
+    Assert ($LASTEXITCODE -eq 9) 'Named online wrapper lost exit status.'
+    $arguments = Get-Content -LiteralPath "$Root\scripts\arguments.json" -Raw | ConvertFrom-Json
+    Assert ($arguments.InstallDir -eq "$Root\custom-install" -and $arguments.Board -eq 'stm32f4_disco' -and $arguments.CheckOnly) 'Named directory arguments changed.'
     Write-Host '[PASS] Online batch wrapper preserves defaults and custom positional arguments.'
 
     # A native stub verifies build exit-code handling, not Zephyr compilation.
@@ -156,6 +160,50 @@ public static class BuildExitStub {
     Complete-Setup $settings "$Workspace\zephyr-sdk-0.17.0"
     Assert ((Get-Settings $Workspace).SdkDirectory -eq 'zephyr-sdk-0.17.0') 'Relocated SDK settings became absolute.'
     Write-Host '[PASS] Failed builds stop setup; saved SDK path remains relocatable.'
+
+    $fixtureRoot = $Root
+    $PackageRoot = $projectRoot
+    $InstallDir = ''
+    Set-Answers @('')
+    Select-InstallDirectory
+    Assert ($Root -eq $projectRoot) 'Enter did not select the installer directory.'
+    Set-Answers @("$fixtureRoot\prompt-install")
+    Select-InstallDirectory
+    Assert ($Workspace -eq "$fixtureRoot\prompt-install\zephyrproject") 'Prompt did not select the requested workspace.'
+    $InstallDir = "$fixtureRoot\chosen-install"
+    $CheckOnly = $true
+    Install-Online
+    Assert (-not (Test-Path -LiteralPath $Root)) 'Online path check wrote files.'
+    $CheckOnly = $false
+    Copy-InstallerPackage
+    Assert (Test-Path -LiteralPath "$Root\scripts\zephyr-manager.ps1") 'Selected installation is missing its helper.'
+    Assert (Test-Path -LiteralPath "$Root\zephyr-uninstall.bat") 'Selected installation is missing its uninstaller.'
+    Assert (Test-Path -LiteralPath "$Root\tests\verify-workflows.ps1") 'Selected installation is missing its test suite.'
+    $InstallDir = [IO.Path]::GetPathRoot($fixtureRoot)
+    Expect-Failure { Select-InstallDirectory } '*below a drive root*'
+    $InstallDir = "$fixtureRoot\path with spaces"
+    Expect-Failure { Select-InstallDirectory } '*must not contain spaces*'
+    $InstallDir = "$fixtureRoot\unrelated\sentinel"
+    Expect-Failure { Select-InstallDirectory } '*is a file*'
+    $InstallDir = "$fixtureRoot\install-link\new-child"
+    New-Item -ItemType Junction -Path "$fixtureRoot\install-link" -Target "$fixtureRoot\unrelated" | Out-Null
+    try { Expect-Failure { Select-InstallDirectory } '*Linked installation path*' }
+    finally { [IO.Directory]::Delete("$fixtureRoot\install-link") }
+    $Root = $fixtureRoot
+    $Workspace = Join-Path $Root 'zephyrproject'
+    Write-Host '[PASS] Install-directory prompt, named selection, path validation and copied launchers work.'
+
+    $missing = Join-Path $fixtureRoot 'missing-helper'
+    New-Item -ItemType Directory -Path $missing -Force | Out-Null
+    foreach ($wrapper in @('zephyr-easy-setup.bat', 'zephyr-pack-offline.bat', 'zephyr-offline-install.bat', 'zephyr-uninstall.bat', 'zephyr-env.cmd')) {
+        $destination = Join-Path $missing $wrapper
+        Copy-Item -LiteralPath (Join-Path $projectRoot $wrapper) -Destination $destination
+        $output = @(& cmd.exe /c $destination)
+        Assert ($LASTEXITCODE -eq 1) 'Missing helper did not return exit 1.'
+        Assert (($output -join "`n") -like '*Required helper script is missing*') 'Missing-helper guidance was not shown.'
+        Assert (($output -join "`n") -notlike '*Windows PowerShell*') 'Missing helper launched PowerShell.'
+    }
+    Write-Host '[PASS] All launchers stop with guidance when the shared helper is missing.'
     Write-Host 'All isolated workflow checks passed.'
 } finally {
     if (Test-Path -LiteralPath $junctionPath) { [IO.Directory]::Delete($junctionPath) }
