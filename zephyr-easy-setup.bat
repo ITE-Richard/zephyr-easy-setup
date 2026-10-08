@@ -7,10 +7,44 @@ echo   Zephyr RTOS One-Click Automated Setup
 echo ============================================================
 echo.
 
+REM ------------------------------------------------------------
+REM Configuration (Overridable via command-line arguments)
+REM Usage: zephyr-easy-setup.bat [BOARD] [BOARD_QUALIFIER] [SDK_TOOLCHAIN] [ZEPHYR_REVISION]
+REM Example: zephyr-easy-setup.bat it51xxx_evb it51xxx_evb/it51526aw riscv64-zephyr-elf
+REM ------------------------------------------------------------
+set "TARGET_BOARD=%~1"
+if "%TARGET_BOARD%"=="" set "TARGET_BOARD=it51xxx_evb"
+
+set "TARGET_QUALIFIER=%~2"
+if "%TARGET_QUALIFIER%"=="" set "TARGET_QUALIFIER=it51xxx_evb/it51526aw"
+
+set "SDK_TOOLCHAIN=%~3"
+if "%SDK_TOOLCHAIN%"=="" set "SDK_TOOLCHAIN=riscv64-zephyr-elf"
+
+set "ZEPHYR_REVISION=%~4"
+
 REM Set Zephyr workspace directory to zephyrproject alongside this script
 set "WORKSPACE_ROOT=%~dp0zephyrproject"
+
+for /f "tokens=1,2" %%A in ("%WORKSPACE_ROOT%") do if not "%%B"=="" (
+    echo ============================================================
+    echo [ERROR] Space detected in workspace path:
+    echo         "%WORKSPACE_ROOT%"
+    echo ============================================================
+    echo Zephyr RTOS, CMake, and Kconfig do NOT support paths with spaces.
+    echo Please move this project to a path without spaces, for example C:\zephyr or D:\zephyr-easy-setup.
+    echo.
+    pause
+    exit /b 1
+)
+
 echo Target Zephyr Workspace: %WORKSPACE_ROOT%
+echo Target Board:            %TARGET_BOARD%
+if not "%TARGET_QUALIFIER%"=="" echo Target Board Qualifier:  %TARGET_QUALIFIER%
+echo SDK Toolchain:           %SDK_TOOLCHAIN%
+if not "%ZEPHYR_REVISION%"=="" echo Zephyr Revision:         %ZEPHYR_REVISION%
 echo.
+
 
 REM ------------------------------------------------------------
 REM Step 1: Checking winget
@@ -42,7 +76,6 @@ for %%P in (
     Python.Python.3.12
     Git.Git
     oss-winget.dtc
-    wget
     7zip.7zip
 ) do (
     echo Checking/Installing %%P...
@@ -50,7 +83,7 @@ for %%P in (
 )
 
 REM ------------------------------------------------------------
-REM Step 3: Configuring Environment PATH
+REM Step 3: Configuring Environment PATH & Long Paths
 REM ------------------------------------------------------------
 echo.
 echo ===== [Step 3/10] Configuring Environment PATH =====
@@ -66,7 +99,7 @@ call :AddToolPath "%LocalAppData%\Programs\Python\Python312" "python.exe"
 call :AddToolPath "%LocalAppData%\Programs\Python\Python312\Scripts" "pip.exe"
 call :AddToolPath "%ProgramFiles%\Python312" "python.exe"
 call :AddToolPath "%ProgramFiles%\Python312\Scripts" "pip.exe"
-for %%T in (ninja.exe gperf.exe dtc.exe wget.exe) do (
+for %%T in (ninja.exe gperf.exe dtc.exe) do (
     call :AddToolPath "%LocalAppData%\Microsoft\WinGet\Links" "%%T"
     call :AddToolPath "%ProgramFiles%\WinGet\Links" "%%T"
 )
@@ -74,7 +107,7 @@ REM The dtc winget package can expose usr\bin instead of a Links entry.
 for /d %%D in ("%LocalAppData%\Microsoft\WinGet\Packages\oss-winget.dtc_*" "%ProgramFiles%\WinGet\Packages\oss-winget.dtc_*") do call :AddToolPath "%%~fD\usr\bin" "dtc.exe"
 
 REM Do not report success when winget failed or an executable cannot start.
-for %%T in (cmake ninja gperf dtc git python wget) do (
+for %%T in (cmake ninja gperf dtc git python) do (
     echo Checking %%T...
     %%T.exe --version >nul 2>nul
     if errorlevel 1 (
@@ -91,6 +124,9 @@ if errorlevel 1 (
     exit /b 1
 )
 where 7z.exe
+
+REM Enable Git Long Paths to prevent issues with deep Zephyr repository paths
+git config --global core.longpaths true >nul 2>nul
 
 REM Persist missing host paths only; keep workspace .venv and SDK paths local.
 powershell.exe -NoProfile -Command "$ErrorActionPreference = 'Stop'; try { $userPath = [Environment]::GetEnvironmentVariable('Path', 'User'); $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine'); $known = @(($machinePath + ';' + $userPath) -split ';' | ForEach-Object { [Environment]::ExpandEnvironmentVariables($_.Trim()).TrimEnd('\') }); $updatedPath = $userPath; foreach ($dir in ($env:ZEPHYR_HOST_PATH -split ';')) { $dir = $dir.Trim().TrimEnd('\'); if ($dir -and $known -notcontains $dir) { if ([string]::IsNullOrEmpty($updatedPath)) { $updatedPath = $dir } else { $updatedPath = $updatedPath.TrimEnd(';') + ';' + $dir }; $known += $dir } }; if ($updatedPath -cne $userPath) { [Environment]::SetEnvironmentVariable('Path', $updatedPath, 'User') } } catch { Write-Error $_; exit 1 }"
@@ -113,7 +149,7 @@ py -3.12 --version >nul 2>nul
 if not errorlevel 1 (
     set "PYTHON_EXE=py -3.12"
 ) else (
-    where python >nul 2>nul
+    python -c "import sys; sys.exit(0 if sys.version_info.major == 3 and sys.version_info.minor >= 10 else 1)" >nul 2>nul
     if not errorlevel 1 set "PYTHON_EXE=python"
 )
 
@@ -121,7 +157,7 @@ if not defined PYTHON_EXE (
     if exist "%LocalAppData%\Programs\Python\Python312\python.exe" (
         set "PYTHON_EXE=%LocalAppData%\Programs\Python\Python312\python.exe"
     ) else (
-        echo [ERROR] Python 3.12 not found. Please restart terminal or verify installation.
+        echo [ERROR] Python 3.12 (or >= 3.10) not found. Please restart terminal or verify installation.
         pause
         exit /b 1
     )
@@ -146,7 +182,12 @@ if not exist "%WORKSPACE_ROOT%\.venv\Scripts\activate.bat" (
 )
 call "%WORKSPACE_ROOT%\.venv\Scripts\activate.bat"
 python -m pip install --upgrade pip >nul 2>nul
-python -m pip install west >nul 2>nul
+python -m pip install west
+if errorlevel 1 (
+    echo [ERROR] Failed to install west via pip. Please check network connection.
+    pause
+    exit /b 1
+)
 echo [OK] Virtual environment activated, west installed.
 
 REM ------------------------------------------------------------
@@ -157,9 +198,15 @@ echo ===== [Step 6/10] Initializing Zephyr Workspace =====
 cd /d "%WORKSPACE_ROOT%"
 if not exist ".west" (
     echo Initializing west repository in %WORKSPACE_ROOT%...
-    west init -l . >nul 2>nul
-    if errorlevel 1 (
+    if not "%ZEPHYR_REVISION%"=="" (
+        west init -m https://github.com/zephyrproject-rtos/zephyr --mr %ZEPHYR_REVISION% .
+    ) else (
         west init -m https://github.com/zephyrproject-rtos/zephyr .
+    )
+    if errorlevel 1 (
+        echo [ERROR] west init failed. Please check network or git access.
+        pause
+        exit /b 1
     )
 ) else (
     echo [INFO] .west already exists, skipping init.
@@ -183,6 +230,12 @@ if exist "zephyr\scripts\utils\west-packages-pip-install.cmd" (
 ) else (
     west packages pip --install
 )
+if errorlevel 1 (
+    echo [WARNING] west packages pip install encountered issues. Falling back to requirements.txt...
+    if exist "zephyr\scripts\requirements.txt" (
+        pip install -r zephyr\scripts\requirements.txt
+    )
+)
 west zephyr-export
 
 REM ------------------------------------------------------------
@@ -190,20 +243,33 @@ REM Step 8: Installing Zephyr SDK into zephyrproject
 REM ------------------------------------------------------------
 echo.
 echo ===== [Step 8/10] Installing Zephyr SDK into zephyrproject =====
-echo Installing Zephyr SDK (riscv64-zephyr-elf & host tools)...
-west sdk install -d . -t riscv64-zephyr-elf
+echo Installing Zephyr SDK (%SDK_TOOLCHAIN%)...
+west sdk install -d . -t %SDK_TOOLCHAIN%
 if errorlevel 1 (
     echo [WARNING] Minimal toolchain install failed. Trying default SDK install...
     west sdk install -d .
 )
 
+set "ZEPHYR_SDK_INSTALL_DIR="
 for /d %%D in ("%WORKSPACE_ROOT%\zephyr-sdk-*") do (
     set "ZEPHYR_SDK_INSTALL_DIR=%%~fD"
 )
 set "ZEPHYR_TOOLCHAIN_VARIANT=zephyr"
 
-echo [OK] ZEPHYR_SDK_INSTALL_DIR=%ZEPHYR_SDK_INSTALL_DIR%
-echo [OK] ZEPHYR_TOOLCHAIN_VARIANT=%ZEPHYR_TOOLCHAIN_VARIANT%
+if defined ZEPHYR_SDK_INSTALL_DIR (
+    echo [OK] ZEPHYR_SDK_INSTALL_DIR=%ZEPHYR_SDK_INSTALL_DIR%
+    echo [OK] ZEPHYR_TOOLCHAIN_VARIANT=%ZEPHYR_TOOLCHAIN_VARIANT%
+
+    REM Register SDK package with CMake and persist User environment variables
+    if exist "%ZEPHYR_SDK_INSTALL_DIR%\setup.cmd" (
+        echo Registering Zephyr SDK with CMake package registry...
+        call "%ZEPHYR_SDK_INSTALL_DIR%\setup.cmd" -c >nul 2>nul
+    )
+    powershell.exe -NoProfile -Command "[Environment]::SetEnvironmentVariable('ZEPHYR_SDK_INSTALL_DIR', '%ZEPHYR_SDK_INSTALL_DIR%', 'User'); [Environment]::SetEnvironmentVariable('ZEPHYR_TOOLCHAIN_VARIANT', 'zephyr', 'User')"
+    echo [OK] Persisted ZEPHYR_SDK_INSTALL_DIR and ZEPHYR_TOOLCHAIN_VARIANT to user environment.
+) else (
+    echo [WARNING] Zephyr SDK installation directory could not be located in %WORKSPACE_ROOT%.
+)
 
 REM ------------------------------------------------------------
 REM Step 9: Preparing Blinky Sample in zephyrproject\app
@@ -220,18 +286,20 @@ if not exist "%WORKSPACE_ROOT%\app\blinky" (
 )
 
 REM ------------------------------------------------------------
-REM Step 10: Building Blinky for it51xxx_evb
+REM Step 10: Building Blinky for %TARGET_BOARD%
 REM ------------------------------------------------------------
 echo.
-echo ===== [Step 10/10] Building Blinky for it51xxx_evb =====
+echo ===== [Step 10/10] Building Blinky for %TARGET_BOARD% =====
 cd /d "%WORKSPACE_ROOT%\app\blinky"
 if exist "build" rmdir /S /Q build
 
-echo Starting build with west...
-west build -p always -b it51xxx_evb
+echo Starting build with west (-b %TARGET_BOARD%)...
+west build -p always -b %TARGET_BOARD%
 if errorlevel 1 (
-    echo [INFO] Building with 'it51xxx_evb/it51526aw' target qualifier...
-    west build -p always -b it51xxx_evb/it51526aw
+    if not "%TARGET_QUALIFIER%"=="" (
+        echo [INFO] Building with '%TARGET_QUALIFIER%' target qualifier...
+        west build -p always -b %TARGET_QUALIFIER%
+    )
 )
 
 if errorlevel 1 (
