@@ -9,12 +9,12 @@
 | 用途 | 入口 | 範例 |
 | --- | --- | --- |
 | 線上安裝並編譯 Blinky | `zephyr-easy-setup.bat` | `zephyr-easy-setup.bat -InstallDir D:\` |
-| 將既有環境打包成離線 ZIP | `zephyr-pack-offline.bat` | `zephyr-pack-offline.bat -InstallDir D:\` |
+| 將既有環境打包成離線封裝 | `zephyr-pack-offline.bat` | `zephyr-pack-offline.bat -InstallDir D:\` |
 | 檢查已解壓縮的離線包 | `zephyr-offline-install.bat` | `zephyr-offline-install.bat -InstallDir D:\ -CheckOnly` |
-| 安裝 7-Zip、解壓縮、離線安裝並編譯 Blinky | `zephyr-offline-install.bat` | `zephyr-offline-install.bat D:\zephyr-offline-bundle.zip D:\` |
+| 安裝 7-Zip、解壓縮、離線安裝並編譯 Blinky | `zephyr-offline-install.bat` | `zephyr-offline-install.bat -BundlePath D:\zephyr-offline-bundle.7z -InstallDir D:\` |
 | 確認後卸載，保留 app 與快取 | `zephyr-uninstall.bat` | `zephyr-uninstall.bat -InstallDir D:\` |
 
-以上指令從完整專案資料夾執行；PowerShell 中請在 `.bat` 名稱前加上 `.\`。離線安裝會先安裝或辨識 7-Zip，再將完整離線 ZIP 解壓縮到 `-InstallDir` 指定的位置。
+以上指令從完整專案資料夾執行；PowerShell 中請在 `.bat` 名稱前加上 `.\`。離線安裝會先安裝或辨識 7-Zip，再將完整離線 7z 封裝解壓縮到 `-InstallDir` 指定的位置。
 
 ## 系統需求
 
@@ -23,7 +23,7 @@
 - 使用 **Python 3.12 x64**；離線 wheels 固定給相同 Python 次版本與平台使用。
 - 線上安裝與首次補齊離線安裝檔需要網路及支援 `winget download` 的 WinGet。
 - 打包端需有可執行的 `7z.exe`；安裝檔、來源虛擬環境與 SDK 也會在打包前檢查。
-- 需有容納來源、wheels、SDK、暫存副本及 ZIP 的磁碟空間，通常為數 GB 以上。
+- 需有容納來源、wheels、SDK、暫存副本及 7z 封裝的磁碟空間，通常為數 GB 以上。
 - CMake、Git、7-Zip 安裝可能需要系統管理員權限；在乾淨目標電腦上可從系統管理員命令提示字元執行安裝。移除使用者環境設定時，請使用原安裝者的帳號。
 
 ## 一鍵線上安裝
@@ -83,7 +83,7 @@ D:\zephyr\zephyrproject\
 
 Python、Git、CMake、7-Zip 等主機工具由 WinGet 安裝到各自的 Windows 安裝目錄，實際位置依套件與安裝範圍而定。離線安裝時，Ninja、dtc、gperf 則解壓縮到所選安裝根目錄的 `tools\<工具名稱>`，其可執行檔目錄會加入 PATH。
 
-選擇磁碟根目錄時，例如 `-InstallDir D:\`，工作區位於 `D:\zephyrproject`，安裝快取位於 `D:\zephyr_installers`，打包輸出為 `D:\zephyr-offline-bundle.zip`。入口與文件仍留在原專案資料夾。此配置的離線 portable tools 放在 `D:\zephyrproject\.host-tools`，卸載只清理該工作區，不移除其他用途的 `D:\tools`。
+選擇磁碟根目錄時，例如 `-InstallDir D:\`，工作區位於 `D:\zephyrproject`，安裝快取位於 `D:\zephyr_installers`，打包輸出為 `D:\zephyr-offline-bundle.7z`。入口與文件仍留在原專案資料夾。此配置的離線 portable tools 放在 `D:\zephyrproject\.host-tools`，卸載只清理該工作區，不移除其他用途的 `D:\tools`。
 
 ### 自訂板卡、工具鏈與版本
 
@@ -167,7 +167,7 @@ zephyr-pack-offline.bat -InstallDir D:\
 zephyr-pack-offline.bat -InstallDir D:\ -SourceWorkspace D:\existing\zephyrproject -SdkPath D:\sdk\zephyr-sdk-0.17.0
 ```
 
-`-SourceWorkspace` 指定要打包的來源，`-InstallDir` 指定快取、暫存目錄與輸出 ZIP 的位置；兩者可不同。上例仍輸出到 `D:\zephyr-offline-bundle.zip`。
+`-SourceWorkspace` 指定要打包的來源，`-InstallDir` 指定快取、暫存目錄與輸出封裝的位置；兩者可不同。上例仍輸出到 `D:\zephyr-offline-bundle.7z`。
 
 來源必須包含完整 west 工作區（`.west`、Zephyr 與啟用的模組 Git 倉庫）、Python 3.12 x64 的 `.venv`，以及已解壓縮且包含目標 GCC 的 SDK。SDK 不在工作區內或有多個候選版本時，可用 `-SdkPath` 明確指定。來源沒有設定檔時使用 ITE 預設值；其他板卡請加上 `-Board`、`-Qualifier`、`-Toolchain`。
 
@@ -177,21 +177,23 @@ zephyr-pack-offline.bat -InstallDir D:\ -SourceWorkspace D:\existing\zephyrproje
 2. 重用 `zephyr_installers\tools\<package-id>` 中符合副檔名的安裝檔；缺少時透過 WinGet 下載 x64 EXE、MSI 或 ZIP。每項工具都明確指定 `--installer-type`：Python 為 `burn`、Git 為 `inno`、CMake 為 `wix`、7-Zip 為 `exe`，其餘 portable tools 為 `zip`，與離線安裝流程一致；既有不同格式的檔案可保留，但不會當成所需安裝檔使用。這些主機工具下載沒有指定 `--version`，不保證與來源電腦已安裝的工具版本相同；Python 套件則固定來源 `.venv` 的實際版本。
 3. 在乾淨的暫存 `.venv` 使用 `--no-index` 安裝全部固定版本、執行 `pip check`，並驗證 Zephyr / 模組 requirements。驗證使用暫存副本，將與已安裝來源相符的 HTTP(S) 套件引用改成固定版本，避免 pip 在驗證時存取 URL；原始 requirements 不會修改。
 4. 複製程式碼、`.west`、`.git`、SDK 與安裝檔到暫存目錄，不加入本專案的入口、共用腳本、README 或測試。只在副本排除來源 `.venv` 與 `app\blinky\build`，保留其他檔案與來源編譯結果。
-5. 建立逐檔 SHA-256 的 `bundle-manifest.json`，使用 7-Zip 壓縮並測試 ZIP。成功後輸出 `zephyr-offline-bootstrap`，其中包含 7-Zip x64 安裝檔與雜湊資訊，再替換 `zephyr-offline-bundle.zip`。7-Zip 安裝檔同時保留在大型 ZIP 內與外部 bootstrap 資料夾，離線電腦可先安裝 7-Zip，不必先用 Windows 解壓縮大型 ZIP。
+5. 建立逐檔 SHA-256 的 `bundle-manifest.json`，使用離線安裝檔內的 `7z.exe` 製作並測試 `zephyr-offline-bundle.7z`，確保打包與配套安裝檔使用同一版本。成功後在專案資料夾輸出 `7zip-x64.exe` 與 `7zip-x64.json`，清除已包含在封裝內的 `zephyr_installers`，以及舊版留下、版本相符的 `zephyr-offline-bootstrap`。
 
-打包採速度優先：7-Zip 使用 `a -tzip -mx=0`，以 Store 模式直接將檔案存入 ZIP，不進行壓縮運算。ZIP 體積會接近所有打包檔案的總容量，但可省去壓縮與解壓縮運算；實際耗時仍取決於磁碟讀寫與檔案數量。來源驗證、暫存複製、逐檔 SHA-256 與 ZIP 完整性測試仍會執行。新參數只套用於重新啟動的打包流程，既有 ZIP 不會自動改寫。
+打包採速度優先：7-Zip 使用 `a -t7z -mx=0`，以 Copy 模式直接將檔案存入 7z，不進行壓縮運算。7z 體積會接近所有打包檔案的總容量，但可省去壓縮與解壓縮運算；實際耗時仍取決於磁碟讀寫與檔案數量。來源驗證、暫存複製、逐檔 SHA-256 與 7z 完整性測試仍會執行。新設定只套用於重新啟動的打包流程，既有 ZIP 不會自動轉成 7z。
 
-打包完成後，請將以下兩項一起帶到離線電腦，並另外準備完整專案資料夾或 Release 腳本 ZIP：
+打包完成後，請將封裝與完整專案資料夾一起帶到離線電腦；專案資料夾需包含這次打包輸出的 7-Zip 安裝檔與雜湊資訊：
 
 ```text
 D:\
-  zephyr-offline-bundle.zip
-  zephyr-offline-bootstrap\
+  zephyr-offline-bundle.7z
+  zephyr-easy-setup\
+    zephyr-offline-install.bat
+    scripts\
     7zip-x64.exe
-    bootstrap-manifest.json
+    7zip-x64.json
 ```
 
-打包會逐行顯示九個階段與百分比；階段比例不代表剩餘時間。掃描、複製、SHA-256 計算、壓縮及 ZIP 測試使用終端機原本底色的單行進度，不使用 PowerShell 浮動進度區塊；進度行會依視窗寬度截短，並在一般訊息輸出前清除，避免重疊與底色殘留。掃描時顯示檔案數，複製時顯示已寫入容量、估計百分比與經過時間，SHA-256 計算顯示已完成檔案數。壓縮及 ZIP 測試擷取 7-Zip 百分比，只顯示進度條與經過時間，不顯示逐檔動作或檔名；警告、錯誤與失敗退出碼仍會回報。輸出重新導向時，每十秒記錄一次進度，不使用游標控制字元。若系統無法提供複製程序的讀寫計數，仍會更新經過時間，百分比顯示為 `--%`。複製、壓縮與 ZIP 測試期間可按 Ctrl+C 中斷；腳本會結束此次啟動的外部程序並清理打包暫存目錄，大型暫存目錄的清理可能需要時間。已啟動的舊版流程不會套用腳本修改。
+打包會逐行顯示九個階段與百分比；階段比例不代表剩餘時間。掃描、複製、SHA-256 計算、壓縮及 7z 測試每十秒新增一行進度，階段開始與 7z 完成時立即顯示；不覆寫行首、不補滿整行空白，也不使用 PowerShell 浮動進度區塊。進度訊息依視窗寬度截短，使用原本底色，避免終端機折行、縮放或其他訊息輸出時互相覆蓋。掃描時顯示檔案數，複製時顯示已寫入容量、估計百分比與經過時間，SHA-256 計算顯示已完成檔案數。壓縮及 7z 測試擷取 7-Zip 百分比，只顯示進度條與經過時間，不顯示逐檔動作或檔名；警告、錯誤與失敗退出碼仍會回報。重新導向輸出採相同記錄頻率，不含游標控制字元。若系統無法提供複製程序的讀寫計數，仍會更新經過時間，百分比顯示為 `--%`。複製、壓縮與 7z 測試期間可按 Ctrl+C 中斷；腳本會結束此次啟動的外部程序並清理打包暫存目錄，大型暫存目錄的清理可能需要時間。已啟動的舊版流程不會套用腳本修改。
 
 **已安裝的工具不等於仍保留安裝檔。** 若原電腦沒有 Python、Git 等離線安裝程式或缺少 wheels，首次打包需連網補齊。已有完整快取時，可讓 pip 下載使用 `--no-index`，並禁止下載缺少的主機工具安裝檔：
 
@@ -199,7 +201,7 @@ D:\
 zephyr-pack-offline.bat -InstallDir D:\ -CacheOnly
 ```
 
-`-CacheOnly` 仍會驗證來源 `.venv` 與 Zephyr / 模組 requirements，並建立及測試 ZIP。快取不足時直接回報錯誤，不會自動改成連網下載。
+`-CacheOnly` 仍會驗證來源 `.venv` 與 Zephyr / 模組 requirements，並建立及測試封裝。快取不足時直接回報錯誤，不會自動改成連網下載。
 
 快取的目錄格式如下，每個工具目錄應只有一個符合副檔名的安裝檔（WinGet 產生的 YAML 可以保留）：
 
@@ -217,7 +219,7 @@ zephyr_installers/
   tools/oss-winget.dtc/*.zip
 ```
 
-wheel 無法取得或建立、SDK / 模組不完整、local / editable 或 VCS Python dependency、外部 Git objects、Git worktree 或 junction / symlink 都會中止打包，避免產生無法搬移的套件。`-CacheOnly` 只使用已建立的 wheels，不會存取套件的原始 URL。來源內含使用者 app 與 Git 歷史，請依實際需求分享 ZIP。
+wheel 無法取得或建立、SDK / 模組不完整、local / editable 或 VCS Python dependency、外部 Git objects、Git worktree 或 junction / symlink 都會中止打包，避免產生無法搬移的套件。`-CacheOnly` 只使用已建立的 wheels，不會存取套件的原始 URL。來源內含使用者 app 與 Git 歷史，請依實際需求分享封裝。
 
 ### 打包後保留哪些目錄？
 
@@ -225,46 +227,46 @@ wheel 無法取得或建立、SDK / 模組不完整、local / editable 或 VCS P
 
 | 路徑 | 用途 | 打包結束後的處理 |
 | --- | --- | --- |
-| `D:\zephyr_installers` | 主機工具安裝檔、Python wheels 與固定版本 requirements 快取 | 保留，供下次打包重用及 `-CacheOnly` 使用 |
-| `D:\offline_bundle\<隨機識別碼>` | 本次打包的驗證虛擬環境、工作區副本與暫存 ZIP | 在清理階段刪除；失敗或可處理的取消也會執行清理 |
-| `D:\offline_bundle` | 所有打包暫存子目錄的父目錄 | 保留，正常清理後可為空目錄 |
-| `D:\zephyr-offline-bundle.zip` | 已通過 ZIP 完整性測試的離線包 | 成功後保留；新 ZIP 通過測試才替換舊檔 |
-| `D:\zephyr-offline-bootstrap` | 大型 ZIP 外的 7-Zip 安裝檔與雜湊資訊 | 成功後保留，與 ZIP 一起帶到離線電腦 |
+| `D:\zephyr_installers` | 主機工具安裝檔、Python wheels 與固定版本 requirements | 成功發布封裝後，核對內容與封裝的 SHA-256，再刪除；打包失敗時保留以便重試 |
+| `D:\offline_bundle\<隨機識別碼>` | 本次打包的驗證虛擬環境、工作區副本與暫存 7z 封裝 | 在清理階段刪除；失敗或可處理的取消也會執行清理 |
+| `D:\offline_bundle` | 所有打包暫存子目錄的父目錄 | 此次建立且清空時刪除；原有檔案保留 |
+| `D:\zephyr-offline-bundle.7z` | 已通過 7z 完整性測試的離線包 | 成功後保留；新 7z 通過測試才替換舊檔 |
+| `D:\zephyr-offline-bootstrap` | 舊版流程留下的 7-Zip 安裝檔副本 | 不再產生；成功打包後清除版本相符且僅含 bootstrap 檔案的資料夾 |
+| 專案資料夾的 `7zip-x64.exe`、`7zip-x64.json` | 與封裝一致的離線 7-Zip 安裝檔及雜湊資訊 | 保留，與完整專案一起帶到離線電腦 |
 
-因此，打包後仍看到 `offline_bundle` 與 `zephyr_installers` 是預期行為。空的 `offline_bundle` 可手動刪除，下次打包會重新建立。刪除 `zephyr_installers` 不影響已產生的 ZIP，但下次打包需重新取得安裝檔與 wheels，且快取補齊前無法使用 `-CacheOnly`。
+安裝檔、wheels 與 requirements 已包含在封裝內，成功打包後不另留 `zephyr_installers`。下次打包會重新取得這些檔案；若要使用 `-CacheOnly`，需先從既有封裝還原 `zephyr_installers`，或使用失敗打包留下的完整快取。清理若發現檔案在打包後變更，或 bootstrap 含其他檔案，會保留資料並回報錯誤。
 
 若強制終止 PowerShell、關閉視窗或關機，清理可能來不及執行而留下暫存子目錄。手動移除前，請先確認沒有其他打包程序正在使用該目錄。
 
 ## 完全離線安裝
 
-將完整專案資料夾另行帶到離線電腦，保留四個 `.bat` 與 `scripts`。將 `zephyr-offline-bundle.zip` 與 `zephyr-offline-bootstrap` 放在目標安裝根目錄，例如 `D:\`，或放在專案資料夾。**不用先手動解壓縮大型 ZIP**，從專案資料夾執行：
+將完整專案資料夾另行帶到離線電腦，保留四個 `.bat`、`scripts`、`7zip-x64.exe` 與 `7zip-x64.json`。將 `zephyr-offline-bundle.7z` 放在目標安裝根目錄，例如 `D:\`，或放在專案資料夾。舊版封裝旁的 `zephyr-offline-bootstrap` 仍可用來安裝 7-Zip。**不用先手動解壓縮大型 7z 封裝**，從專案資料夾執行：
 
 ```cmd
-zephyr-offline-install.bat D:\zephyr-offline-bundle.zip D:\
+zephyr-offline-install.bat -BundlePath D:\zephyr-offline-bundle.7z -InstallDir D:\
 ```
 
-第一個位置參數是 ZIP 路徑，第二個是安裝根目錄；上例會解壓縮到 `D:\`，工作區位於 `D:\zephyrproject`。ZIP 路徑若包含空白，請加上引號。後面可加上 `-Board`、`-Qualifier`、`-Toolchain` 或 `-CheckOnly` 等選項；`-CheckOnly` 仍只檢查已解壓縮的離線包，不安裝工具或解壓縮。
+`-BundlePath` 指定 7z 或 ZIP 封裝路徑，`-InstallDir` 指定安裝根目錄；上例會解壓縮到 `D:\`，工作區位於 `D:\zephyrproject`。封裝路徑若包含空白，請加上引號。可加上 `-Board`、`-Qualifier`、`-Toolchain` 或 `-CheckOnly` 等選項；`-CheckOnly` 仍只檢查已解壓縮的離線包，不安裝工具或解壓縮。
 
-原本的具名參數與 ZIP 自動尋找方式也保留，例如 `zephyr-offline-install.bat -InstallDir D:\`。
+省略 `-BundlePath` 時會自動尋找封裝，例如 `zephyr-offline-install.bat -InstallDir D:\`。優先尋找 `.7z`，也支援舊的 `zephyr-offline-bundle.zip`。
 
 流程依序為：
 
-1. 尋找離線 ZIP，先檢查其中的路徑與目的地；若未安裝 7-Zip，驗證 ZIP 旁 `zephyr-offline-bootstrap` 的安裝檔雜湊，再安裝 7-Zip。
-2. 使用 7-Zip 解壓縮到 `-InstallDir`，顯示百分比與經過時間。解壓縮失敗或取消時停止，不繼續安裝其他套件。
+1. 尋找離線封裝，顯示目的地路徑掃描、7-Zip 準備、manifest 讀取與完整性驗證階段。目的地用 .NET 掃描一次，顯示已檢查項目數；若未安裝 7-Zip，優先驗證並使用專案資料夾的 `7zip-x64.exe`，其次找封裝旁的同名安裝檔，最後找 `zephyr-offline-bootstrap`。ZIP 可在安裝前核對配套版本；7z 會在 7-Zip 可執行後、完整解壓縮前核對安裝檔與封裝內的 SHA-256。
+2. 目的地已有工作區或 manifest 時，先依指定封裝的 manifest 檢查檔案與 SHA-256。內容完整且一致時，顯示 `skipping extraction` 並繼續安裝，不重複解壓縮或驗證，也不列出完整 7z 的所有路徑。需要補解壓縮時才檢查 7z 全部路徑，再解壓縮到 `-InstallDir`；解壓縮失敗或取消時停止，不繼續安裝其他套件。
 3. 檢查解壓縮後的 manifest、逐檔 SHA-256 與必要檔案。
 4. 安裝或辨識其他主機工具、解壓縮 portable tools、建立 `.venv`、從固定版本 wheels 安裝 Python 套件、註冊 Zephyr / SDK 並編譯 Blinky。
 
-ZIP 預設先從 `-InstallDir` 尋找，再從專案資料夾尋找；`zephyr-offline-bootstrap` 必須與 ZIP 放在一起。若 ZIP 放在其他位置，可明確指定，ZIP 路徑可以包含空白：
+封裝預設先尋找 `-InstallDir` 與專案資料夾中的 `.7z`，再尋找同位置的舊 ZIP。使用 `zephyr-offline-bootstrap` 時，該資料夾必須與封裝放在一起。若封裝放在其他位置，可明確指定，封裝路徑可以包含空白：
 
 ```cmd
-zephyr-offline-install.bat E:\offline\zephyr-offline-bundle.zip D:\zephyr
-zephyr-offline-install.bat "E:\offline media\zephyr-offline-bundle.zip" D:\zephyr
-zephyr-offline-install.bat -InstallDir D:\zephyr -BundlePath E:\offline\zephyr-offline-bundle.zip
+zephyr-offline-install.bat -BundlePath E:\offline\zephyr-offline-bundle.7z -InstallDir D:\zephyr
+zephyr-offline-install.bat -BundlePath "E:\offline media\zephyr-offline-bundle.7z" -InstallDir D:\zephyr
 ```
 
 目的地已有 `bundle-manifest.json` 且未指定 `-BundlePath` 時，直接使用已解壓縮的離線包。已安裝的 7-Zip 會重用；若手動解壓縮了舊版離線包，腳本會先驗證離線包，再從內部安裝檔安裝 7-Zip，最後安裝其他套件。
 
-自動解壓縮會跳過目的地既有檔案，以保留使用者 app；若既有檔案與離線包雜湊不符，驗證會停止。要重新解壓縮或接續中斷的解壓縮，可明確指定 `-BundlePath`；若目的地含有與離線包不同的檔案，請改用新的空目錄或先備份並處理差異。
+解壓縮會跳過目的地既有檔案，以保留使用者 app；若既有檔案與離線包雜湊不符，驗證會停止。明確指定 `-BundlePath` 時，會使用該封裝的 manifest；舊的 `bundle-manifest.json` 不會決定新封裝的驗證結果。完整目的地會跳過解壓縮，缺少檔案則補解壓縮。若目的地含有與離線包不同的檔案，請改用新的空目錄或先備份並處理差異。
 
 若已有 Python 3.12 x64 的相容 `.venv`，會重用並安裝固定版本套件；不會自動刪除該環境。此流程不執行 `winget install`、`west update` 或 `west sdk install`，pip 使用 `--isolated --no-index`。
 
@@ -274,7 +276,9 @@ zephyr-offline-install.bat -InstallDir D:\zephyr -BundlePath E:\offline\zephyr-o
 zephyr-offline-install.bat -InstallDir D:\ -CheckOnly
 ```
 
-`-CheckOnly` 檢查 manifest 格式、列出的檔案雜湊、必要工作區檔案、SDK 版本檔、wheels 是否存在及主機安裝檔清單；它不安裝 7-Zip、不解壓縮 ZIP，也不執行套件安裝、Python 相依性驗證、SDK 編譯器或 Blinky 編譯。僅有 ZIP 而尚未解壓縮時，會回報需要先解壓縮，且不變更檔案。
+`-CheckOnly` 檢查 manifest 格式、列出的檔案雜湊、必要工作區檔案、SDK 版本檔、wheels 是否存在及主機安裝檔清單；它不安裝 7-Zip、不解壓縮封裝，也不執行套件安裝、Python 相依性驗證、SDK 編譯器或 Blinky 編譯。僅有封裝而尚未解壓縮時，會回報需要先解壓縮，且不變更檔案。
+
+兩個離線流程結束前會清理此次建立的暫存資料。打包在成功、失敗或取消時清除暫存工作區、驗證用 `.venv`、7-Zip 執行檔副本與未發布的封裝；若 `offline_bundle` 是此次建立且已空，也會刪除。成功發布後再清除 `zephyr_installers` 與舊的 bootstrap 副本，保留輸出封裝及專案資料夾的配套 7-Zip 安裝檔。離線安裝的清單與 manifest 檢查在記憶體中進行，不留下暫存檔；安裝解壓縮後的工作區及安裝檔會保留，解壓縮中斷後可用 `-BundlePath` 接續。
 
 可用 `-Board`、`-Qualifier`、`-Toolchain` 覆寫目標；SDK 必須已包含對應工具鏈。例如：
 
@@ -282,11 +286,11 @@ zephyr-offline-install.bat -InstallDir D:\ -CheckOnly
 zephyr-offline-install.bat -InstallDir D:\ -Board stm32f4_disco -Toolchain arm-zephyr-eabi
 ```
 
-安裝程式若要求重新啟動，腳本會停止，重啟後再執行。覆寫目標會更新設定檔，之後若要再次通過原 manifest 的雜湊檢查，需先備份變更，再將完整 ZIP 解壓縮到乾淨目錄；卸載後保留的 app 若仍與離線包一致，可使用 `-BundlePath` 補回其餘檔案。
+安裝程式若要求重新啟動，腳本會停止，重啟後再執行。覆寫目標會更新設定檔，之後若要再次通過原 manifest 的雜湊檢查，需先備份變更，再將完整 封裝解壓縮到乾淨目錄；卸載後保留的 app 若仍與離線包一致，可使用 `-BundlePath` 補回其餘檔案。
 
 ### Release ZIP 與完整離線包
 
-Release 的 `zephyr-easy-setup-v<version>.zip` 提供腳本、文件與測試。包含 Zephyr 原始碼、SDK、Python wheels 及主機工具安裝檔的 `zephyr-offline-bundle.zip`，需由 `zephyr-pack-offline.bat` 在完整來源環境中產生，並與 `zephyr-offline-bootstrap` 一起輸出到所選安裝根目錄；例如 `-InstallDir D:\` 會輸出到 `D:\zephyr-offline-bundle.zip` 與 `D:\zephyr-offline-bootstrap`。
+Release 的 `zephyr-easy-setup-v<version>.zip` 提供腳本、文件與測試。包含 Zephyr 原始碼、SDK、Python wheels 及主機工具安裝檔的 `zephyr-offline-bundle.7z`，需由 `zephyr-pack-offline.bat` 在完整來源環境中產生，輸出到所選安裝根目錄；例如 `-InstallDir D:\` 會輸出到 `D:\zephyr-offline-bundle.7z`。配套的 `7zip-x64.exe` 與 `7zip-x64.json` 會輸出到專案資料夾。
 
 完整離線包只包含 manifest、安裝快取與工作區，不包含本專案的四個 `.bat`、`scripts`、README 或測試。離線電腦需要另外準備完整專案資料夾或解壓縮 Release 腳本 ZIP，並從該資料夾操作離線包。下方隔離測試指令適用於原始碼 checkout 或 Release 腳本 ZIP。
 
@@ -305,7 +309,7 @@ Also uninstall shared Python, Git, CMake, Ninja, dtc, gperf and 7-Zip? (y/N):
 
 第一題只有 `y`（不分大小寫）會繼續；直接 Enter、N 或其他輸入都取消且不變更檔案。第二題預設保留共用工具；選 y 時使用 WinGet 移除列出的工具，可能影響其他開發專案，且需要目標電腦有可用的 WinGet。
 
-卸載會保留所選工作區的 `zephyrproject\app` 原位，移除其餘工作區內容及本地 portable tools，只清理指向本工作區的使用者環境設定與 CMake 登錄。遇到 junction / symlink 會在刪除前停止。`zephyr_installers`、離線 ZIP、`zephyr-offline-bootstrap`、其他位置的工作區與 SDK 都保留。卸載失敗會回傳 exit code 1，不會顯示完整成功。
+卸載會保留所選工作區的 `zephyrproject\app` 原位，移除其餘工作區內容、本地 portable tools 與安裝根目錄的舊 `bundle-manifest.json`，只清理指向本工作區的使用者環境設定與 CMake 登錄。遇到 junction / symlink 會在刪除前停止。`zephyr_installers`、離線封裝、`zephyr-offline-bootstrap`、其他位置的工作區與 SDK 都保留。卸載失敗會回傳 exit code 1，不會顯示完整成功。
 
 共用工具若沒有符合的 WinGet 已安裝套件，會顯示 `[SKIP]` 並繼續；這不代表手動安裝或其他位置的 portable 工具已被移除。真正的卸載錯誤仍會回傳失敗。
 
@@ -323,7 +327,8 @@ zephyr-easy-setup/
   tests/verify-workflows.ps1  隔離驗證
   tests/verify-launcher-timing.ps1  四個入口的執行時間與退出碼驗證
   tests/verify-offline-bootstrap.ps1  7-Zip 安裝順序與離線解壓縮驗證
-  tests/verify-pack-archive.ps1   ZIP 整合驗證
+  tests/verify-pack-archive.ps1   7z 整合驗證
+  tests/verify-pack-cleanup.ps1   7z 發布、配套版本與暫存清理驗證
   tests/verify-pack-progress.ps1  打包進度與取消驗證
   tests/verify-pack-terminal.ps1  終端機進度顯示驗證
   tests/verify-uninstall-tools.ps1  共用工具卸載回傳碼驗證
@@ -341,6 +346,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\verify-workflows.p
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\verify-launcher-timing.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\verify-offline-bootstrap.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\verify-pack-archive.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\verify-pack-cleanup.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\verify-pack-progress.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\verify-pack-terminal.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\verify-uninstall-tools.ps1
@@ -350,13 +356,15 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\verify-uninstall-t
 
 `verify-launcher-timing.ps1` 以延遲的共用腳本模擬流程，驗證四個批次入口在成功、失敗、取消與缺少腳本時顯示總耗時，並保留原本的退出碼，不執行實際安裝或卸載。
 
-`verify-pack-archive.ps1` 需要已安裝 7-Zip，會實際壓縮、檢查及解壓縮小型測試 ZIP，驗證檔案內容、隱藏檔、空目錄與錯誤回報；另以 native stub 驗證即時進度、跨次讀取的百分比、警告輸出與取消清理。
+`verify-pack-archive.ps1` 需要已安裝 7-Zip，會實際壓縮、檢查及解壓縮小型測試封裝，驗證檔案內容、隱藏檔、空目錄與錯誤回報；另以 native stub 驗證即時進度、跨次讀取的百分比、警告輸出與取消清理。
 
-`verify-offline-bootstrap.ps1` 需要可執行的 7-Zip，會實際解壓縮小型 ZIP；系統安裝以 stub 模擬。驗證 7-Zip 安裝、解壓縮、雜湊檢查與其他套件的先後順序、bootstrap 雜湊、ZIP 自動尋找、既有 app 保留及錯誤處理，不會真的安裝系統工具。
+`verify-offline-bootstrap.ps1` 需要可執行的 7-Zip，會實際解壓縮小型 7z 與 ZIP；系統安裝以 stub 模擬。驗證本地安裝檔與封裝版本一致、7-Zip 安裝順序、bootstrap 雜湊、自動尋找、既有 app 保留及錯誤處理，不會真的安裝系統工具。
 
-`verify-pack-progress.ps1` 驗證掃描與雜湊結果、複製進度、無法取得 I/O 計數時的顯示，以及取消後結束本次外部程序；可處理的打包取消會回傳 exit code 130。`verify-pack-terminal.ps1` 驗證窄視窗截短、覆寫與清除進度行、保留終端機顏色，以及重新導向輸出時的記錄頻率。
+`verify-pack-cleanup.ps1` 需要可執行的 7-Zip 與專案目錄中的 `7zip-x64.exe`。模擬 Python 驗證，實際使用安裝檔內的 7-Zip 製作小型 7z，並驗證成功、失敗與取消時清除暫存，保留已發布封裝和原有檔案。
 
-完整驗收還需要：在線上機器完成安裝及編譯、產生 ZIP，再於沒有相關工具且斷網的 Windows x64 機器解壓縮安裝與編譯。隔離測試通過不代表上述完整驗收已完成。
+`verify-pack-progress.ps1` 驗證掃描與雜湊結果、複製進度、無法取得 I/O 計數時的顯示，以及取消後結束本次外部程序；可處理的打包取消會回傳 exit code 130。`verify-pack-terminal.ps1` 驗證完整換行、窄視窗截短、視窗縮放和一般訊息交錯時的排列、保留終端機顏色、立即顯示完成百分比，以及一般終端機與重新導向輸出的記錄頻率。
+
+完整驗收還需要：在線上機器完成安裝及編譯、產生 7z 封裝，再於沒有相關工具且斷網的 Windows x64 機器解壓縮安裝與編譯。隔離測試通過不代表上述完整驗收已完成。
 
 自動化執行時，可設定 `ZEPHYR_NO_PAUSE=1` 省略批次檔最後的 pause；線上安裝請同時指定 `-InstallDir` 以略過目錄詢問。卸載的 y/N 確認仍會保留。
 

@@ -64,17 +64,31 @@ function Get-ToolsDirectory {
     return Join-Path $Root 'tools'
 }
 
-function Assert-NoLinks([string]$Path) {
+function Assert-NoLinks([string]$Path, [switch]$ShowProgress) {
     if (-not (Test-Path -LiteralPath $Path)) { return }
     $item = Get-Item -LiteralPath $Path -Force
     if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Linked path is not supported: $Path" }
-    # Reject junctions/symlinks before descending into them.
-    if ($item.PSIsContainer) {
-        foreach ($child in Get-ChildItem -LiteralPath $Path -Force) {
-            if ($child.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Linked path is not supported: $($child.FullName)" }
-            if ($child.PSIsContainer) { Assert-NoLinks $child.FullName }
+    if (-not $item.PSIsContainer) { return }
+    # Enumerate with .NET instead of invoking PowerShell cmdlets for every directory.
+    $pending = New-Object 'System.Collections.Generic.Stack[IO.DirectoryInfo]'
+    $pending.Push((New-Object IO.DirectoryInfo($item.FullName)))
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+    $count = 0
+    $nextUpdate = 0.0
+    try {
+        while ($pending.Count) {
+            $directory = $pending.Pop()
+            foreach ($child in $directory.GetFileSystemInfos()) {
+                if ($child.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Linked path is not supported: $($child.FullName)" }
+                if ($child -is [IO.DirectoryInfo]) { $pending.Push($child) }
+                $count++
+                if ($ShowProgress -and $timer.Elapsed.TotalSeconds -ge $nextUpdate) {
+                    Write-PackProgress -Activity 'Check existing paths' -Status ("{0:N0} entries; {1:N0}s" -f $count, $timer.Elapsed.TotalSeconds)
+                    $nextUpdate = $timer.Elapsed.TotalSeconds + 1
+                }
+            }
         }
-    }
+    } finally { if ($ShowProgress) { Write-PackProgress -Completed } }
 }
 
 function Remove-Local([string]$Path, [string]$Parent) {
@@ -303,7 +317,7 @@ function Install-Online {
 }
 
 function Get-PackConsoleWidth {
-    # Only rewrite a line in an actual console; redirected output needs ordinary log lines.
+    # Use the visible width only to shorten progress messages; never rewrite console rows.
     if ($Host.Name -ne 'ConsoleHost' -or [Console]::IsOutputRedirected) { return 0 }
     try { return [Math]::Max(0, [Math]::Min([Console]::WindowWidth, [Console]::BufferWidth) - 1) }
     catch { return 0 }
@@ -319,7 +333,7 @@ function Get-PackProgressText([string]$Activity, [string]$Status, [int]$PercentC
         $bar = ('#' * $filled) + ('-' * ($barWidth - $filled))
         $label = "$percent%"
     }
-    $line = ("$label [$bar] $Activity | $Status" -replace '[\r\n\t]', ' ')
+    $line = ("$label [$bar] $Activity | $Status" -replace '[\x00-\x1f\x7f]', ' ')
     if ($Width -gt 0 -and $line.Length -gt $Width) { $line = $line.Substring(0, $Width) }
     return $line
 }
@@ -327,31 +341,22 @@ function Get-PackProgressText([string]$Activity, [string]$Status, [int]$PercentC
 function Write-PackProgress {
     param([string]$Activity, [string]$Status, [int]$PercentComplete = -1, [switch]$Completed)
     if (-not (Get-Variable -Name PackProgressState -Scope Script -ErrorAction SilentlyContinue)) {
-        $script:PackProgressState = @{ Active = $false; Width = 0; Activity = ''; LastLog = [datetime]::MinValue }
+        $script:PackProgressState = @{ Activity = ''; LastLog = [datetime]::MinValue; LastPercent = -1 }
     }
     $state = $script:PackProgressState
-    $width = Get-PackConsoleWidth
     if ($Completed) {
-        if ($state.Active) {
-            if ($width -gt 0) { Write-Host -NoNewline ("`r" + (' ' * [Math]::Min($width, $state.Width)) + "`r") }
-            else { Write-Host '' }
-        }
-        $state.Active = $false
         $state.Activity = ''
+        $state.LastPercent = -1
         return
     }
-    $line = Get-PackProgressText $Activity $Status $PercentComplete $width
-    if ($width -gt 0) {
-        # Reserve the last column to avoid wrapping; padding clears the previous longer text.
-        Write-Host -NoNewline ("`r" + $line.PadRight($width))
-        $state.Active = $true
-        $state.Width = $width
-    } else {
-        $now = [datetime]::UtcNow
-        if ($state.Activity -ne $Activity -or ($now - $state.LastLog).TotalSeconds -ge 10) {
-            Write-Host $line
-            $state.LastLog = $now
-        }
+    $now = [datetime]::UtcNow
+    $finished = $PercentComplete -ge 100 -and $state.LastPercent -lt 100
+    if ($state.Activity -ne $Activity -or ($now - $state.LastLog).TotalSeconds -ge 10 -or $finished) {
+        # Complete log lines survive terminal reflow and cannot overwrite native output.
+        $line = Get-PackProgressText $Activity $Status $PercentComplete (Get-PackConsoleWidth)
+        Write-Host $line
+        $state.LastLog = $now
+        $state.LastPercent = $PercentComplete
     }
     $state.Activity = $Activity
 }
@@ -461,7 +466,7 @@ function Invoke-PackArchive([string]$Exe, [string[]]$Arguments, [string]$Activit
     $process = New-Object Diagnostics.Process
     $process.StartInfo.FileName = $Exe
     # 7-Zip includes filenames in its progress stream even at log level zero.
-    # Read that stream privately and render only its percentage with our single-row UI.
+    # Read that stream privately and log only its percentage and elapsed time.
     $nativeArgs = $Arguments + @('-bb0', '-bso0', '-bsp1', '-bse2', '-sccUTF-8')
     $process.StartInfo.Arguments = ($nativeArgs | ForEach-Object { '"' + ($_ -replace '(\\+)$', '$1$1') + '"' }) -join ' '
     $process.StartInfo.WorkingDirectory = (Get-Location).ProviderPath
@@ -567,20 +572,40 @@ function Get-HostInstaller($Tool, [string]$Directory, [switch]$CacheOnly) {
     return Get-Installer $Directory $Tool.Extension
 }
 
-function Save-OfflineBootstrap([string]$Installer, [string]$Directory) {
-    Assert-NoLinks $Directory
+function Save-OfflineBootstrap([string]$Installer, [string]$Directory, [switch]$Flat) {
+    if ($Flat) {
+        # Do not traverse an unrelated working tree just to publish two files.
+        if ((Test-Path -LiteralPath $Directory) -and ((Get-Item -LiteralPath $Directory -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw "Linked path is not supported: $Directory" }
+    } else { Assert-NoLinks $Directory }
     New-Item -ItemType Directory -Path $Directory -Force | Out-Null
     $destination = Join-Path $Directory '7zip-x64.exe'
+    Assert-NoLinks $destination
     Copy-Item -LiteralPath $Installer -Destination $destination -Force
-    Save-Json @{ Format = 1; Installer = '7zip-x64.exe'; Sha256 = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash } (Join-Path $Directory 'bootstrap-manifest.json')
+    $metadataName = if ($Flat) { '7zip-x64.json' } else { 'bootstrap-manifest.json' }
+    Assert-NoLinks (Join-Path $Directory $metadataName)
+    Save-Json @{ Format = 1; Installer = '7zip-x64.exe'; Sha256 = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash } (Join-Path $Directory $metadataName)
 }
 
 function Get-OfflineBootstrapInstaller([string]$Archive) {
+    # The launcher directory carries the exact installer selected during packaging.
+    foreach ($localDirectory in @($PackageRoot, (Split-Path $Archive -Parent)) | Select-Object -Unique) {
+        $localInstaller = Join-Path $localDirectory '7zip-x64.exe'
+        $localMetadata = Join-Path $localDirectory '7zip-x64.json'
+        if (Test-Path -LiteralPath $localInstaller -PathType Leaf) {
+            Assert-NoLinks $localInstaller
+            Assert-NoLinks $localMetadata
+            if (-not (Test-Path -LiteralPath $localMetadata -PathType Leaf)) { throw "Missing 7-Zip installer metadata: $localMetadata" }
+            $metadata = Get-Content -LiteralPath $localMetadata -Raw | ConvertFrom-Json
+            if ($metadata.Format -ne 1 -or $metadata.Installer -ne '7zip-x64.exe') { throw 'Unsupported 7-Zip bootstrap metadata.' }
+            if ((Get-FileHash -LiteralPath $localInstaller -Algorithm SHA256).Hash -ne $metadata.Sha256) { throw '7-Zip bootstrap installer checksum failed.' }
+            return $localInstaller
+        }
+    }
     $directory = Join-Path (Split-Path $Archive -Parent) 'zephyr-offline-bootstrap'
     Assert-NoLinks $directory
     $metadataPath = Join-Path $directory 'bootstrap-manifest.json'
     if (-not (Test-Path -LiteralPath $metadataPath -PathType Leaf)) {
-        throw "7-Zip is not installed. Copy zephyr-offline-bootstrap beside the ZIP: $directory"
+        throw "7-Zip is not installed. Copy 7zip-x64.exe and 7zip-x64.json to $PackageRoot, or copy zephyr-offline-bootstrap beside the archive: $directory"
     }
     $metadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
     if ($metadata.Format -ne 1 -or $metadata.Installer -ne '7zip-x64.exe') { throw 'Unsupported 7-Zip bootstrap metadata.' }
@@ -594,6 +619,7 @@ function Use-OfflineSevenZip([string]$Installer, [string]$Archive) {
     $command = Get-Command '7z.exe' -ErrorAction SilentlyContinue
     if (-not $command) {
         if (-not $Installer) { $Installer = Get-OfflineBootstrapInstaller $Archive }
+        if ($Archive -and [IO.Path]::GetExtension($Archive) -ieq '.zip') { Assert-ArchiveInstaller $Archive '' $Installer }
         Write-Host '[OFFLINE] Installing 7-Zip before extraction and other packages...'
         Start-Installer $Installer '/S'
         Refresh-Path
@@ -603,21 +629,73 @@ function Use-OfflineSevenZip([string]$Installer, [string]$Archive) {
     # The info command can print format/codec lists even with -bso0.
     & $command.Source i | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "$($command.Source) failed (exit $LASTEXITCODE)." }
+    if ($Archive -and $Installer) { Assert-ArchiveInstaller $Archive $command.Source $Installer }
     return $command.Source
 }
 
-function Assert-BundleArchive([string]$Archive) {
-    # Check the central directory without extracting files or installing tools.
+function Get-BundleManifestJson([string]$Archive, [string]$SevenZip) {
+    if ([IO.Path]::GetExtension($Archive) -ieq '.zip') {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $zip = [IO.Compression.ZipFile]::OpenRead($Archive)
+        try {
+            $entry = $zip.GetEntry('bundle-manifest.json')
+            if (-not $entry) { throw 'Archive does not contain bundle-manifest.json at its root.' }
+            $reader = New-Object IO.StreamReader($entry.Open())
+            try { $json = $reader.ReadToEnd() } finally { $reader.Dispose() }
+        } finally { $zip.Dispose() }
+    } else {
+        $json = @(& $SevenZip e -so -spd -sccUTF-8 -- $Archive 'bundle-manifest.json') -join "`n"
+        if ($LASTEXITCODE -ne 0) { throw 'Cannot read archive manifest.' }
+    }
+    return $json
+}
+
+function Save-BundleManifest([string]$Json, [string]$Directory) {
+    $path = Assert-Within (Join-Path $Directory 'bundle-manifest.json') $Directory
+    Assert-NoLinks $path
+    [IO.File]::WriteAllText($path, $Json, (New-Object Text.UTF8Encoding($true)))
+}
+
+function Assert-ArchiveInstaller([string]$Archive, [string]$SevenZip, [string]$Installer) {
+    $json = Get-BundleManifestJson $Archive $SevenZip
+    $manifest = $json | ConvertFrom-Json
+    if ($manifest.Format -ne 1 -or $manifest.Architecture -ne 'x64') { throw 'Unsupported bundle format/platform.' }
+    $entry = @($manifest.HostTools | Where-Object { $_.Id -eq '7zip.7zip' })
+    if ($entry.Count -ne 1) { throw 'Bundle is missing installer metadata: 7zip.7zip' }
+    if ((Get-FileHash -LiteralPath $Installer -Algorithm SHA256).Hash -ne $entry[0].Sha256) {
+        throw '7-Zip installer does not match the version bundled in the archive. Copy the installer and metadata from the same packaging run.'
+    }
+}
+
+function Assert-BundleArchive([string]$Archive, [string]$SevenZip, [switch]$SkipDestinationChecks) {
+    # Inspect archive entries without writing any archive contents.
     Add-Type -AssemblyName System.IO.Compression.FileSystem
-    $zip = [IO.Compression.ZipFile]::OpenRead($Archive)
+    $zip = $null
     try {
+        if ([IO.Path]::GetExtension($Archive) -ieq '.7z') {
+            $listing = @(& $SevenZip l -slt -ba -sccUTF-8 -- $Archive)
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot list bundle archive.' }
+            $entries = New-Object 'System.Collections.Generic.List[object]'
+            $record = $null
+            foreach ($line in $listing) {
+                if ($line.StartsWith('Path = ')) {
+                    $record = [pscustomobject]@{ FullName = $line.Substring(7); ExternalAttributes = 0 }
+                    $entries.Add($record)
+                } elseif ($record -and ($line -match '^(Symbolic Link|Hard Link|Reparse) = ' -or $line -match '^Attributes = .*\bl[rwx-]')) {
+                    throw "Linked archive entry is not supported: $($record.FullName)"
+                }
+            }
+        } else {
+            $zip = [IO.Compression.ZipFile]::OpenRead($Archive)
+            $entries = $zip.Entries
+        }
         $hasManifest = $false
-        foreach ($entry in $zip.Entries) {
+        foreach ($entry in $entries) {
             $name = $entry.FullName.Replace('/', '\')
             if ([IO.Path]::IsPathRooted($name) -or $name.Contains(':') -or @($name -split '\\') -contains '..') {
                 throw "Unsupported bundle archive path: $name"
             }
-            $path = Assert-Within (Join-Path $Root $name) $Root
+            $path = Assert-Within ([IO.Path]::Combine($Root, $name)) $Root
             $isManifest = $path -ieq (Join-Path $Root 'bundle-manifest.json')
             $isWorkspace = $path -ieq $Workspace -or $path.StartsWith($Workspace + '\', [StringComparison]::OrdinalIgnoreCase)
             $isCache = $path -ieq $Cache -or $path.StartsWith($Cache + '\', [StringComparison]::OrdinalIgnoreCase)
@@ -627,37 +705,73 @@ function Assert-BundleArchive([string]$Archive) {
             }
             if ($isManifest -and -not $name.EndsWith('\')) { $hasManifest = $true }
         }
-        if (-not $hasManifest) { throw 'ZIP does not contain bundle-manifest.json at its root.' }
-    } finally { $zip.Dispose() }
-    Assert-NoLinks $Workspace
-    Assert-NoLinks $Cache
-    Assert-NoLinks (Join-Path $Root 'bundle-manifest.json')
+        if (-not $hasManifest) { throw 'Archive does not contain bundle-manifest.json at its root.' }
+    } finally { if ($zip) { $zip.Dispose() } }
+    if (-not $SkipDestinationChecks) {
+        Assert-NoLinks $Workspace -ShowProgress
+        Assert-NoLinks $Cache -ShowProgress
+        Assert-NoLinks (Join-Path $Root 'bundle-manifest.json')
+    }
 }
 
 function Expand-OfflineBundle {
+    $script:OfflineValidatedManifest = $null
     $archive = $BundlePath
     if (-not $archive) {
         # An extracted bundle takes precedence, so reruns do not overwrite development files.
         if (Test-Path -LiteralPath (Join-Path $Root 'bundle-manifest.json') -PathType Leaf) { return }
-        foreach ($candidate in @((Join-Path $Root 'zephyr-offline-bundle.zip'), (Join-Path $PackageRoot 'zephyr-offline-bundle.zip'))) {
+        foreach ($candidate in @((Join-Path $Root 'zephyr-offline-bundle.7z'), (Join-Path $PackageRoot 'zephyr-offline-bundle.7z'), (Join-Path $Root 'zephyr-offline-bundle.zip'), (Join-Path $PackageRoot 'zephyr-offline-bundle.zip'))) {
             if (Test-Path -LiteralPath $candidate -PathType Leaf) { $archive = $candidate; break }
         }
-        if (-not $archive) { throw "Missing $(Join-Path $Root 'bundle-manifest.json'). Copy zephyr-offline-bundle.zip and zephyr-offline-bootstrap to the installation directory or project folder, or specify -BundlePath." }
+        if (-not $archive) { throw "Missing $(Join-Path $Root 'bundle-manifest.json'). Copy zephyr-offline-bundle.7z and its 7-Zip installer, or specify -BundlePath." }
     }
     $archive = Get-DirectoryPath $archive
-    if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) { throw "Missing bundle ZIP: $archive" }
+    if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) { throw "Missing bundle archive: $archive" }
+    if ([IO.Path]::GetExtension($archive) -notin @('.zip', '.7z')) { throw 'Bundle must be a .7z or .zip archive.' }
     if ($CheckOnly) {
         if (Test-Path -LiteralPath (Join-Path $Root 'bundle-manifest.json') -PathType Leaf) { return }
-        throw '-CheckOnly requires an extracted bundle; no tools were installed and no ZIP was extracted. Run offline installation without -CheckOnly first.'
+        throw '-CheckOnly requires an extracted bundle; no tools were installed and no archive was extracted. Run offline installation without -CheckOnly first.'
     }
-    Assert-BundleArchive $archive
+    # ZIP can be inspected before installation; 7z needs the bootstrapped executable.
+    Write-Host '[OFFLINE] Checking existing destination paths...'
+    if ([IO.Path]::GetExtension($archive) -ieq '.zip') { Assert-BundleArchive $archive }
+    else {
+        Assert-NoLinks $Workspace -ShowProgress
+        Assert-NoLinks $Cache -ShowProgress
+        Assert-NoLinks (Join-Path $Root 'bundle-manifest.json')
+    }
+    Write-Host '[OFFLINE] Finding or installing 7-Zip...'
     $sevenZip = Use-OfflineSevenZip '' $archive
+    Write-Host '[OFFLINE] Reading bundle manifest from archive...'
+    $manifestJson = Get-BundleManifestJson $archive $sevenZip
+    if ((Test-Path -LiteralPath (Join-Path $Root 'bundle-manifest.json') -PathType Leaf) -or
+        (Test-Path -LiteralPath (Join-Path $Workspace '.west\config') -PathType Leaf)) {
+        try {
+            Write-Host '[OFFLINE] Checking whether the destination already contains the complete bundle...'
+            $currentManifest = $manifestJson | ConvertFrom-Json
+            $script:OfflineValidatedManifest = Test-Bundle -Manifest $currentManifest
+        } catch {
+            # A partial extraction can be resumed; changed files must remain untouched.
+            if ($_.Exception.Message -notlike 'Missing bundle file:*' -and $_.Exception.Message -notlike 'Incomplete bundle:*' -and $_.Exception.Message -notlike '*SDK version file is missing*' -and $_.Exception.Message -notlike '*contains no Python wheels*') { throw }
+        }
+        if ($script:OfflineValidatedManifest) {
+            Save-BundleManifest $manifestJson $Root
+            Write-Host '[OFFLINE] Destination already contains this complete bundle; skipping extraction.'
+            return
+        }
+    }
+    if ([IO.Path]::GetExtension($archive) -ieq '.7z') {
+        Write-Host '[OFFLINE] Checking archive paths before extraction...'
+        Assert-BundleArchive $archive $sevenZip -SkipDestinationChecks
+    }
     Write-Host "[OFFLINE] Extracting $archive to $Root (existing files are preserved)..."
     # PowerShell 5.1 rejects New-Item on an existing drive root such as D:\.
     if (-not (Test-Path -LiteralPath $Root -PathType Container)) {
         New-Item -ItemType Directory -Path $Root -Force | Out-Null
     }
-    Invoke-PackArchive $sevenZip @('x', '-aos', ('-o' + $Root), $archive) 'Extract offline ZIP'
+    Invoke-PackArchive $sevenZip @('x', '-aos', ('-o' + $Root), $archive) 'Extract offline archive'
+    # Existing sources/apps stay protected by -aos; metadata must describe this archive.
+    Save-BundleManifest $manifestJson $Root
 }
 
 function ConvertTo-OfflineRequirements([string]$Python, [string[]]$Frozen) {
@@ -730,6 +844,44 @@ function Copy-OfflineRequirements([string]$Path, [string]$Source, [string]$Desti
     return $target
 }
 
+function Remove-PackInputs($Files, [string]$SevenZipHash, [switch]$CheckOnly) {
+    # Only remove cache files that were included unchanged in the published archive.
+    $inventory = @{}
+    foreach ($entry in $Files) {
+        if ($entry.Path.StartsWith('zephyr_installers\', [StringComparison]::OrdinalIgnoreCase)) { $inventory[$entry.Path] = $entry.Sha256 }
+    }
+    $null = Assert-Within $Cache $Root
+    Assert-NoLinks $Cache
+    if (Test-Path -LiteralPath $Cache) {
+        foreach ($file in Get-ChildItem -LiteralPath $Cache -File -Recurse -Force) {
+            $relative = Get-RelativeBundlePath $file.FullName $Root
+            if (-not $inventory.ContainsKey($relative) -or (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash -ne $inventory[$relative]) {
+                throw "Cache changed after packaging; preserved for review: $($file.FullName)"
+            }
+        }
+    }
+    $bootstrap = Join-Path $Root 'zephyr-offline-bootstrap'
+    $null = Assert-Within $bootstrap $Root
+    Assert-NoLinks $bootstrap
+    if (Test-Path -LiteralPath $bootstrap) {
+        $children = @(Get-ChildItem -LiteralPath $bootstrap -Force)
+        if (@($children | Where-Object { $_.PSIsContainer -or $_.Name -notin @('7zip-x64.exe', 'bootstrap-manifest.json') }).Count) {
+            throw "Bootstrap contains unrelated files; preserved for review: $bootstrap"
+        }
+        $installer = Join-Path $bootstrap '7zip-x64.exe'
+        if ((Test-Path -LiteralPath $installer) -and (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash -ne $SevenZipHash) {
+            throw "Bootstrap installer differs from this archive; preserved for review: $bootstrap"
+        }
+    }
+    if ($CheckOnly) { Write-Host '[OK] Packaging inputs match the published archive and can be removed.'; return }
+    foreach ($directory in @($Cache, $bootstrap)) {
+        if (Test-Path -LiteralPath $directory) {
+            Write-Host "[CLEANUP] Removing published packaging inputs: $directory"
+            Remove-Local $directory $Root
+        }
+    }
+}
+
 function New-Bundle {
     Set-PackStage 1 'Verify source workspace and SDK'
     if (-not $SourceWorkspace) { $SourceWorkspace = $Workspace }
@@ -768,10 +920,17 @@ function New-Bundle {
     }
     # A clean venv proves wheel closure without contacting PyPI.
     $stage = Join-Path $Root ('offline_bundle\' + [guid]::NewGuid().ToString('N'))
+    $stageParent = Split-Path $stage -Parent
+    $stageParentExisted = Test-Path -LiteralPath $stageParent
     $testVenv = Join-Path $stage 'wheel-test'
     $bundle = Join-Path $stage 'bundle'
-    $partial = Join-Path $stage 'zephyr-offline-bundle.zip'
+    $partial = Join-Path $stage 'zephyr-offline-bundle.7z'
     try {
+        # Use the binaries in the bundled installer, so pack and offline extraction agree.
+        $packTools = Join-Path $stage '7zip'
+        $sevenZipEntry = @($hostEntries | Where-Object { $_.Id -eq '7zip.7zip' })[0]
+        Invoke-PackArchive $sevenZip @('e', '-y', '-spd', '-r-', ('-o' + $packTools), '--', (Join-Path $Root $sevenZipEntry.Path), '7z.exe', '7z.dll') 'Prepare matching 7-Zip'
+        $sevenZip = Join-Path $packTools '7z.exe'
         Set-PackStage 4 'Validate Python dependencies offline'
         New-Item -ItemType Directory -Path $bundle -Force | Out-Null
         Invoke-Checked $python @('-m', 'venv', $testVenv)
@@ -813,37 +972,54 @@ function New-Bundle {
         Save-Json @{ Format = 1; Python = '3.12'; Architecture = 'x64'; Sdk = 'zephyrproject\' + $sdkName; Settings = $settings; HostTools = $hostEntries; Files = $files } (Join-Path $bundle 'bundle-manifest.json')
         Push-Location -LiteralPath $bundle
         try {
-            Set-PackStage 7 'Compress ZIP'
-            # Speed takes priority over size: ZIP Store avoids compression work.
-            Invoke-PackArchive $sevenZip @('a', '-tzip', '-mx=0', $partial, '.\*') 'Compress ZIP'
-            Set-PackStage 8 'Test ZIP integrity'
-            Invoke-PackArchive $sevenZip @('t', $partial) 'Test ZIP integrity'
+            Set-PackStage 7 'Create 7z archive'
+            # Keep the existing speed-first policy, now using the 7z format.
+            Invoke-PackArchive $sevenZip @('a', '-t7z', '-mx=0', $partial, '.\*') 'Create 7z archive'
+            Set-PackStage 8 'Test 7z integrity'
+            Invoke-PackArchive $sevenZip @('t', $partial) 'Test 7z integrity'
         }
         finally { Pop-Location }
-        Set-PackStage 9 'Publish ZIP and clean staging files'
+        Set-PackStage 9 'Publish 7z archive and clean staging files'
         $sevenZipEntry = @($hostEntries | Where-Object { $_.Id -eq '7zip.7zip' })[0]
-        Save-OfflineBootstrap (Join-Path $Root $sevenZipEntry.Path) (Join-Path $Root 'zephyr-offline-bootstrap')
-        Move-Item -LiteralPath $partial -Destination (Join-Path $Root 'zephyr-offline-bundle.zip') -Force
+        Save-OfflineBootstrap (Join-Path $Root $sevenZipEntry.Path) $PackageRoot -Flat
+        Move-Item -LiteralPath $partial -Destination (Join-Path $Root 'zephyr-offline-bundle.7z') -Force
+        Remove-PackInputs $files $sevenZipEntry.Sha256
     } finally {
         try {
             if (Test-Path -LiteralPath $stage) {
                 Write-Host "[CLEANUP] Removing temporary files: $stage"
                 Remove-Local $stage (Join-Path $Root 'offline_bundle')
             }
+            if (-not $stageParentExisted -and (Test-Path -LiteralPath $stageParent) -and @(Get-ChildItem -LiteralPath $stageParent -Force).Count -eq 0) {
+                $null = Assert-Within $stageParent $Root
+                Assert-NoLinks $stageParent
+                Remove-Item -LiteralPath $stageParent -Force
+            }
         }
         finally { Write-PackProgress -Completed }
     }
-    Write-Host "[SUCCESS] Created $Root\zephyr-offline-bundle.zip"
-    Write-Host "[SUCCESS] Copy $Root\zephyr-offline-bootstrap alongside the ZIP for offline 7-Zip installation."
+    Write-Host "[SUCCESS] Created $Root\zephyr-offline-bundle.7z"
+    Write-Host "[SUCCESS] Matching 7-Zip installer: $PackageRoot\7zip-x64.exe and 7zip-x64.json"
 }
 
-function Test-Bundle {
-    $manifest = Get-Content -LiteralPath (Join-Path $Root 'bundle-manifest.json') -Raw | ConvertFrom-Json
+function Test-Bundle($Manifest) {
+    if (-not $Manifest) { $Manifest = Get-Content -LiteralPath (Join-Path $Root 'bundle-manifest.json') -Raw | ConvertFrom-Json }
     if ($manifest.Format -ne 1 -or $manifest.Python -ne '3.12' -or $manifest.Architecture -ne 'x64') { throw 'Unsupported bundle format/platform.' }
-    foreach ($entry in $manifest.Files) {
-        $path = Assert-Within (Join-Path $Root $entry.Path) $Root
-        if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ne $entry.Sha256) { throw "Bundle file is damaged or modified: $($entry.Path)" }
-    }
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+    $nextUpdate = 0.0
+    $count = 0
+    try {
+        foreach ($entry in $manifest.Files) {
+            if ($timer.Elapsed.TotalSeconds -ge $nextUpdate) {
+                Write-PackProgress -Activity 'Verify offline bundle' -Status ("{0:N0}/{1:N0} files; {2:N0}s" -f $count, $manifest.Files.Count, $timer.Elapsed.TotalSeconds) -PercentComplete ([int][Math]::Floor(100 * $count / [Math]::Max(1, $manifest.Files.Count)))
+                $nextUpdate = $timer.Elapsed.TotalSeconds + 1
+            }
+            $path = Assert-Within (Join-Path $Root $entry.Path) $Root
+            if (-not [IO.File]::Exists($path)) { throw "Missing bundle file: $($entry.Path)" }
+            if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ne $entry.Sha256) { throw "Bundle file is damaged or modified: $($entry.Path)" }
+            $count++
+        }
+    } finally { Write-PackProgress -Completed }
     foreach ($required in @('zephyrproject\.west\config', 'zephyrproject\zephyr\scripts\requirements.txt', 'zephyr_installers\requirements-frozen.txt')) {
         if (-not (Test-Path -LiteralPath (Join-Path $Root $required))) { throw "Incomplete bundle: $required" }
     }
@@ -863,20 +1039,25 @@ function Test-Bundle {
 function Start-Installer([string]$Path, [string]$Arguments, [switch]$Msi) {
     $exe = $Path
     if ($Msi) { $exe = 'msiexec.exe'; $Arguments = '/i "' + $Path + '" ' + $Arguments }
+    Write-Host "[INSTALL] Starting $(Split-Path $Path -Leaf); waiting for the installer to finish..."
+    $timer = [Diagnostics.Stopwatch]::StartNew()
     $process = Start-Process -FilePath $exe -ArgumentList $Arguments -WindowStyle Hidden -Wait -PassThru
+    Write-Host ("[INSTALL] Finished {0}; exit {1}; elapsed {2:N0}s" -f (Split-Path $Path -Leaf), $process.ExitCode, $timer.Elapsed.TotalSeconds)
     if ($process.ExitCode -eq 3010) { throw 'Installer requires a Windows restart. Restart and run offline installation again.' }
     if ($process.ExitCode -ne 0) { throw "Installer failed: $Path (exit $($process.ExitCode))" }
 }
 
 function Install-Offline {
     Expand-OfflineBundle
-    $manifest = Test-Bundle
+    $manifest = $script:OfflineValidatedManifest
+    if (-not $manifest) { $manifest = Test-Bundle }
     if ($CheckOnly) { return }
     $sevenZipEntry = @($manifest.HostTools | Where-Object { $_.Id -eq '7zip.7zip' })[0]
     $sevenZip = Use-OfflineSevenZip (Join-Path $Root $sevenZipEntry.Path) ''
     Refresh-Path
     foreach ($tool in $Tools) {
         if ($tool.Name -eq '7z') { continue }
+        Write-Host "[OFFLINE] Checking or installing host tool: $($tool.Id)"
         $entry = @($manifest.HostTools | Where-Object { $_.Id -eq $tool.Id })[0]
         $installer = Join-Path $Root $entry.Path
         if ($tool.Extension -eq '.zip') {
@@ -893,17 +1074,21 @@ function Install-Offline {
         }
         Refresh-Path
     }
+    Write-Host '[OFFLINE] Verifying host tools and saving PATH...'
     Test-HostTools
     Save-HostPaths
     Invoke-Checked 'git.exe' @('config', '--global', 'core.longpaths', 'true')
     $python = Get-Python312
     $venvPython = Join-Path $Workspace '.venv\Scripts\python.exe'
+    Write-Host '[OFFLINE] Preparing the workspace Python environment...'
     if (-not (Test-Path -LiteralPath $venvPython)) { Invoke-Checked $python @('-m', 'venv', (Join-Path $Workspace '.venv')) }
     Invoke-Checked $venvPython @('-c', "import sys,struct; assert sys.version_info[:2] == (3,12) and struct.calcsize('P') == 8")
     Use-Workspace $Workspace
+    Write-Host '[OFFLINE] Installing Python packages from local wheels...'
     Invoke-Checked $venvPython @('-m', 'pip', '--isolated', 'install', '--no-index', '--find-links', (Join-Path $Cache 'wheels'), '-r', (Join-Path $Cache 'requirements-frozen.txt'))
     $settings = Get-Settings $Workspace
     $sdk = Find-Sdk $Workspace (Assert-Within (Join-Path $Root $manifest.Sdk) $Workspace) $settings.Toolchain
+    Write-Host '[OFFLINE] Configuring the SDK and building Blinky...'
     Complete-Setup $settings $sdk
 }
 
@@ -944,19 +1129,21 @@ function Clear-Registration {
 function Uninstall-Zephyr {
     Write-Host "Remove sources, modules, SDK and .venv ONLY from: $Workspace"
     Write-Host "Preserve applications in: $Workspace\app"
-    Write-Host 'Offline installers and bundle ZIP are retained. Close build tools before continuing.'
+    Write-Host 'Offline installers and bundle archives are retained. Close build tools before continuing.'
     if ((Read-Host 'Remove this Zephyr installation? (y/N)').Trim() -ine 'y') { Write-Host 'Cancelled. No changes made.'; return }
     $removeTools = (Read-Host 'Also uninstall shared Python, Git, CMake, Ninja, dtc, gperf and 7-Zip? (y/N)').Trim() -ieq 'y'
     $project = Assert-Within $Workspace $Root
     $localTools = Get-ToolsDirectory
     Assert-NoLinks $project
     Assert-NoLinks $localTools
+    Assert-NoLinks (Join-Path $Root 'bundle-manifest.json')
     if (Test-Path -LiteralPath $project) {
         foreach ($child in Get-ChildItem -LiteralPath $project -Force) {
             if ($child.Name -ine 'app') { Remove-Local $child.FullName $project }
         }
     }
     Remove-Local $localTools $Root
+    Remove-Local (Join-Path $Root 'bundle-manifest.json') $Root
     Clear-Registration
     if ($removeTools) {
         Refresh-Path

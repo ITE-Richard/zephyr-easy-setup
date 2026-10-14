@@ -22,3 +22,5 @@ zephyr_installers/
 tools/
 offline_bundle/
 zephyr-offline-bootstrap/
+7zip-x64.exe
+7zip-x64.json

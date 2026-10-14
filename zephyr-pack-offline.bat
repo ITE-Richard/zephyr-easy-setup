@@ -2,7 +2,7 @@
 setlocal EnableExtensions
 set "ZEPHYR_START_TICKS="
 for /f %%T in ('powershell.exe -NoProfile -Command "[Diagnostics.Stopwatch]::GetTimestamp()"') do set "ZEPHYR_START_TICKS=%%T"
-REM Outputs zephyr-offline-bundle.zip and zephyr-offline-bootstrap for offline extraction.
+REM Outputs zephyr-offline-bundle.7z and a matching offline 7-Zip installer.
 if not exist "%~dp0scripts\zephyr-manager.ps1" (
     echo [ERROR] Required helper script is missing:
     echo         "%~dp0scripts\zephyr-manager.ps1"
@@ -11,8 +11,11 @@ if not exist "%~dp0scripts\zephyr-manager.ps1" (
     set "RESULT=1"
     goto ReportElapsed
 )
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\zephyr-manager.ps1" -Mode Pack %*
-set "RESULT=%ERRORLEVEL%"
+(
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\zephyr-manager.ps1" -Mode Pack %*
+    call set "RESULT=%%ERRORLEVEL%%"
+    goto ReportElapsed
+)
 :ReportElapsed
 if defined ZEPHYR_START_TICKS powershell.exe -NoProfile -Command "$elapsed = [TimeSpan]::FromSeconds(([Diagnostics.Stopwatch]::GetTimestamp() - [long]$env:ZEPHYR_START_TICKS) / [Diagnostics.Stopwatch]::Frequency); Write-Host ('[TIME] Total elapsed: {0:00}:{1:00}:{2:00} ({3:F2} seconds)' -f [math]::Floor($elapsed.TotalHours), $elapsed.Minutes, $elapsed.Seconds, $elapsed.TotalSeconds)"
 if not defined ZEPHYR_NO_PAUSE pause

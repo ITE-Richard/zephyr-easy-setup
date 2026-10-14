@@ -39,6 +39,26 @@ exit $FixtureExit
         }
         Write-Host "[PASS] $launcher reports elapsed time and preserves success, failure and cancellation exit codes."
     }
+    # CMD must not resume at an obsolete byte offset if the launcher changes mid-run.
+    $mutationHelper = @'
+[CmdletBinding()]
+param([string]$Mode, [string]$InstallDir, [string]$LauncherToRewrite)
+$target = [IO.Path]::GetFullPath($LauncherToRewrite)
+if ([IO.Path]::GetDirectoryName($target) -ne [IO.Path]::GetFullPath($InstallDir).TrimEnd('\')) { throw 'Mutation escaped its fixture.' }
+$content = [IO.File]::ReadAllText($target)
+[IO.File]::WriteAllText($target, ('REM Updated while helper was running ' + ('x' * 113) + "`r`n" + $content), [Text.Encoding]::ASCII)
+Write-Host "Mutation fixture completed: $Mode"
+exit 9
+'@
+    Set-Content -LiteralPath $helper -Value $mutationHelper -Encoding UTF8
+    foreach ($launcher in $launchers) {
+        $launcherPath = Join-Path $fixture $launcher
+        $output = @(& cmd.exe /c $launcherPath -InstallDir $fixture -LauncherToRewrite $launcherPath 2>&1)
+        Assert ($LASTEXITCODE -eq 9) "$launcher lost the helper exit code after an in-flight update."
+        Assert-Timing $output 0
+        Assert ($output.Count -eq 2 -and ($output -join "`n").Contains('Mutation fixture completed:')) 'An in-flight update executed a partial launcher line.'
+    }
+    Write-Host '[PASS] Updating a launcher while its helper runs preserves exit codes and does not execute partial lines.'
     Remove-Item -LiteralPath $helper -Force
     foreach ($launcher in $launchers) {
         $output = @(& cmd.exe /c (Join-Path $fixture $launcher))

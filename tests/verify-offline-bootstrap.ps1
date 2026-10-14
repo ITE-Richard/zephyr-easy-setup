@@ -28,6 +28,21 @@ $script:extractionFailure = $false
 $script:events = New-Object 'System.Collections.Generic.List[string]'
 $script:archiveFunction = ${function:Invoke-PackArchive}
 $script:bundleFunction = ${function:Test-Bundle}
+$script:saveManifestFunction = ${function:Save-BundleManifest}
+$script:linkFunction = ${function:Assert-NoLinks}
+$script:archiveCheckFunction = ${function:Assert-BundleArchive}
+$script:linkChecks = New-Object 'System.Collections.Generic.List[string]'
+$script:archiveChecks = 0
+function Assert-NoLinks {
+    param([string]$Path, [switch]$ShowProgress)
+    $script:linkChecks.Add([IO.Path]::GetFullPath($Path))
+    & $script:linkFunction $Path -ShowProgress:$ShowProgress
+}
+function Assert-BundleArchive {
+    param([string]$Archive, [string]$SevenZip, [switch]$SkipDestinationChecks)
+    $script:archiveChecks++
+    & $script:archiveCheckFunction $Archive $SevenZip -SkipDestinationChecks:$SkipDestinationChecks
+}
 function Assert([bool]$Condition, [string]$Message) { if (-not $Condition) { throw $Message } }
 function Expect-Failure([scriptblock]$Action, [string]$Pattern) {
     $failure = ''
@@ -59,8 +74,9 @@ function Invoke-PackArchive {
     & $script:archiveFunction -Exe $Exe -Arguments $Arguments -Activity $Activity
 }
 function Test-Bundle {
+    param($Manifest)
     $script:events.Add('validate')
-    & $script:bundleFunction
+    & $script:bundleFunction -Manifest $Manifest
 }
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 try {
@@ -125,7 +141,13 @@ try {
         $script:driveRootExtracted = $false
         # Do not scan unrelated installations under the real drive root.
         function Assert-NoLinks { param([string]$Path) }
+        function Test-Bundle { param($Manifest); throw 'Missing bundle file: isolated drive-root test' }
         function New-Item { param([string]$ItemType, [string]$Path, [switch]$Force); throw "Existing drive root must not be created: $Path" }
+        function Save-BundleManifest {
+            param([string]$Json, [string]$Directory)
+            Assert ($Directory -eq $Root) 'Drive-root manifest destination was changed.'
+            & $script:saveManifestFunction $Json $safeDestination
+        }
         function Invoke-PackArchive {
             param([string]$Exe, [string[]]$Arguments, [string]$Activity)
             $outputIndex = [Array]::IndexOf($Arguments, '-o' + $Root)
@@ -149,12 +171,32 @@ try {
     $CheckOnly = $false
     Write-Host '[PASS] Bootstrap checksum, read-only checks, automatic media discovery and real ZIP extraction.'
 
+    # An old manifest must not be reused when a different archive is explicitly supplied.
+    $oldManifest = Get-Content -LiteralPath (Join-Path $source 'bundle-manifest.json') -Raw | ConvertFrom-Json
+    $oldManifest.Files[0].Sha256 = '0' * 64
+    Save-Json $oldManifest (Join-Path $Root 'bundle-manifest.json')
     $BundlePath = $archive
+    $script:events.Clear()
+    Expand-OfflineBundle
+    $null = Test-Bundle
+    Assert ((Get-Content -LiteralPath (Join-Path $Root 'bundle-manifest.json') -Raw | ConvertFrom-Json).Files[0].Sha256 -ne ('0' * 64)) 'Explicit ZIP left the old manifest in place.'
+    Assert (-not $script:events.Contains('extract')) 'A complete destination was extracted again to replace a stale manifest.'
+    $script:events.Clear()
+    $CheckOnly = $true
+    Install-Offline
+    $CheckOnly = $false
+    Assert (-not $script:events.Contains('extract')) 'A complete explicit bundle was extracted again.'
+    $BundlePath = ''
+
+    $BundlePath = $archive
+    Remove-Item -LiteralPath (Join-Path $Workspace 'zephyr-sdk-0.17.0\sdk_version') -Force
     $script:events.Clear()
     $script:extractionFailure = $true
     Expect-Failure { Install-Offline } '*ZIP extraction failure*'
-    Assert ($script:events.Count -eq 1 -and $script:events[0] -eq 'extract') 'A failed extraction continued into validation or package installation.'
+    Assert ($script:events.Count -eq 2 -and $script:events[0] -eq 'validate' -and $script:events[1] -eq 'extract') 'A failed extraction continued into post-extraction validation or package installation.'
     $script:extractionFailure = $false
+    $null = Expand-OfflineBundle
+    $script:events.Clear()
 
     # An explicit ZIP must preserve a modified app and fail validation before other installers.
     $BundlePath = $archive
@@ -165,7 +207,7 @@ try {
     Assert (-not $script:events.Contains('install-package')) 'A checksum failure installed other packages.'
     $script:events.Clear()
     $BundlePath = Join-Path $PackageRoot 'missing.zip'
-    Expect-Failure { Expand-OfflineBundle } '*Missing bundle ZIP*'
+    Expect-Failure { Expand-OfflineBundle } '*Missing bundle archive*'
     Assert ($script:events.Count -eq 0) 'A missing ZIP started installation or extraction.'
     $badZip = Join-Path $PackageRoot 'bad.zip'
     $zip = [IO.Compression.ZipFile]::Open($badZip, [IO.Compression.ZipArchiveMode]::Create)
@@ -204,6 +246,10 @@ try {
     Assert ($script:events[0] -eq 'install-7zip' -and $script:events[1] -eq 'extract' -and $script:events[2] -eq 'validate' -and $script:events[3] -eq 'install-package') 'Offline installation order is incorrect.'
     Assert (@($script:events | Where-Object { $_ -eq 'install-7zip' }).Count -eq 1) '7-Zip was installed twice.'
     Assert ($script:events[-1] -eq 'complete') 'Offline installation did not reach build verification.'
+    $script:events.Clear()
+    Install-Offline
+    Assert (-not $script:events.Contains('extract') -and $script:events[-1] -eq 'complete') 'A complete destination did not skip extraction and continue installation.'
+    Assert (@($script:events | Where-Object { $_ -eq 'validate' }).Count -eq 1) 'A complete destination was validated twice.'
 
     # Already installed 7-Zip also supports legacy ZIPs without a bootstrap sidecar.
     Remove-Local $Root $fixture
@@ -214,8 +260,52 @@ try {
     Remove-Local $Root $fixture
     $script:sevenZipInstalled = $false
     $script:events.Clear()
-    Expect-Failure { Expand-OfflineBundle } '*Copy zephyr-offline-bootstrap beside the ZIP*'
+    Expect-Failure { Expand-OfflineBundle } '*Copy 7zip-x64.exe and 7zip-x64.json*'
     Assert ($script:events.Count -eq 0 -and -not (Test-Path -LiteralPath $Root)) 'Missing bootstrap modified the destination.'
+    # The launcher-local installer must be byte-identical to the bundled installer.
+    Save-OfflineBootstrap $installerSource $PackageRoot -Flat
+    $localInstaller = Join-Path $PackageRoot '7zip-x64.exe'
+    Assert ((Get-OfflineBootstrapInstaller $archive) -eq $localInstaller) 'Launcher-local 7-Zip installer was not selected.'
+    Set-Content -LiteralPath $localInstaller -Value 'wrong version'
+    Save-Json @{ Format = 1; Installer = '7zip-x64.exe'; Sha256 = (Get-FileHash -LiteralPath $localInstaller).Hash } (Join-Path $PackageRoot '7zip-x64.json')
+    Expect-Failure { Expand-OfflineBundle } '*installer does not match the version bundled*'
+    Assert ($script:events.Count -eq 0) 'Mismatched ZIP installer was executed.'
+    Save-OfflineBootstrap $installerSource $PackageRoot -Flat
+    Expand-OfflineBundle
+    Assert ($script:events[0] -eq 'install-7zip' -and $script:events[1] -eq 'extract') 'Launcher-local installer did not precede ZIP extraction.'
+    Remove-Local $Root $fixture
+    $sevenZArchive = Join-Path $PackageRoot 'zephyr-offline-bundle.7z'
+    Push-Location -LiteralPath $source
+    try {
+        & $script:sevenZipExe a -t7z -mx=0 -bso0 -bsp0 $sevenZArchive '.\*'
+        Assert ($LASTEXITCODE -eq 0) 'Could not create the 7z fixture.'
+    } finally { Pop-Location }
+    $BundlePath = ''
+    New-Item -ItemType Directory -Path $Root -Force | Out-Null
+    Save-Json $oldManifest (Join-Path $Root 'bundle-manifest.json')
+    $BundlePath = $sevenZArchive
+    $script:sevenZipInstalled = $false
+    $script:events.Clear()
+    Expand-OfflineBundle
+    Assert ($script:events[0] -eq 'install-7zip' -and $script:events.Contains('extract')) '7z discovery did not install the local bootstrap before extraction.'
+    $null = Test-Bundle
+    Assert ((Get-Content -LiteralPath (Join-Path $Root 'bundle-manifest.json') -Raw | ConvertFrom-Json).Files[0].Sha256 -ne ('0' * 64)) 'Explicit 7z left the old manifest in place.'
+    Assert ((Get-FileHash -LiteralPath (Join-Path $Workspace 'app\user.c')).Hash -eq (Get-FileHash -LiteralPath (Join-Path $source 'zephyrproject\app\user.c')).Hash) '7z extraction changed the app.'
+    $script:events.Clear()
+    $script:archiveChecks = 0
+    $script:linkChecks.Clear()
+    Install-Offline
+    Assert (-not $script:events.Contains('extract') -and $script:events[-1] -eq 'complete') 'A complete 7z destination was extracted again or did not continue installation.'
+    Assert ($script:archiveChecks -eq 0) 'A complete 7z destination unnecessarily scanned all archive entries.'
+    Assert (@($script:linkChecks | Where-Object { $_ -eq $Workspace }).Count -eq 1 -and @($script:linkChecks | Where-Object { $_ -eq $Cache }).Count -eq 1) 'A complete destination was scanned for links more than once.'
+    $unsafeSource = Join-Path $fixture 'unsafe-7z'
+    New-Item -ItemType Directory -Path $unsafeSource -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $unsafeSource 'unrelated.txt') -Value 'outside the bundle inventory'
+    $unsafe7z = Join-Path $PackageRoot 'unsafe.7z'
+    & $script:sevenZipExe a -t7z -mx=0 -bso0 -bsp0 $unsafe7z (Join-Path $unsafeSource 'unrelated.txt')
+    Assert ($LASTEXITCODE -eq 0) 'Could not create unsafe 7z fixture.'
+    Expect-Failure { Assert-BundleArchive $unsafe7z $script:sevenZipExe } '*Unexpected bundle archive path*'
+    Write-Host '[PASS] Matching launcher-local installer, mismatched version rejection, real 7z discovery/extraction and archive path checks.'
     Write-Host '[PASS] 7-Zip precedes extraction, validation and packages; installed 7-Zip is reused and missing bootstrap stops cleanly.'
     Write-Host 'All offline bootstrap integration checks passed.'
 } finally { Remove-Local $fixture (Join-Path $projectRoot 'offline_bundle') }

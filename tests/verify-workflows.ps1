@@ -227,6 +227,7 @@ try {
     Assert (Test-Path -LiteralPath "$Root\unrelated\sentinel") 'Unrelated workspace was removed.'
     Assert (Test-Path -LiteralPath "$Cache\requirements-frozen.txt") 'Offline cache was removed.'
     Assert ($script:registrationCalls -eq 1) 'Registration cleanup was not called once.'
+    Assert (-not (Test-Path -LiteralPath "$Root\bundle-manifest.json")) 'Uninstall left the old bundle manifest behind.'
     Write-Host '[PASS] Confirmed uninstall preserves app, unrelated data and offline cache.'
 
     # Real batch wrappers propagate errors; no system installers are invoked.

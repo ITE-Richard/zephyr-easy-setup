@@ -13,7 +13,7 @@ $exe = if ($sevenZip) { $sevenZip.Source } else { Join-Path $env:ProgramFiles '7
 if (-not (Test-Path -LiteralPath $exe)) { throw '7-Zip is required for this integration check.' }
 $fixture = Join-Path $projectRoot ('offline_bundle\archive-test-' + [guid]::NewGuid().ToString('N'))
 $source = Join-Path $fixture 'source with spaces'
-$zip = Join-Path $fixture 'archive with spaces.zip'
+$zip = Join-Path $fixture 'archive with spaces.7z'
 $script:events = New-Object 'System.Collections.Generic.List[object]'
 function Assert([bool]$Condition, [string]$Message) { if (-not $Condition) { throw $Message } }
 function Write-PackProgress {
@@ -30,13 +30,15 @@ try {
     (Get-Item -LiteralPath (Join-Path $source '.metadata')).Attributes = [IO.FileAttributes]::Hidden
     Push-Location -LiteralPath $source
     try {
-        $output = @(Invoke-PackArchive $exe @('a', '-tzip', '-mx=0', $zip, '.\*') 'Compress ZIP' 6>&1)
+        $output = @(Invoke-PackArchive $exe @('a', '-t7z', '-mx=0', $zip, '.\*') 'Compress ZIP' 6>&1)
     } finally { Pop-Location }
     Assert ($output.Count -eq 0) 'Successful compression leaked native filenames or summaries.'
     $archiveDetails = @(& $exe l -slt $zip)
     Assert ($LASTEXITCODE -eq 0) 'Could not inspect ZIP compression methods.'
-    $methods = @($archiveDetails | Where-Object { $_ -match '^Method = ' })
-    Assert ($methods.Count -gt 0 -and @($methods | Where-Object { $_ -ne 'Method = Store' }).Count -eq 0) 'Speed-first ZIP unexpectedly compressed file contents.'
+    $methods = @($archiveDetails | Where-Object { $_ -match '^Method = \S' })
+    Assert ($methods.Count -gt 0 -and @($methods | Where-Object { $_ -ne 'Method = Copy' }).Count -eq 0) 'Speed-first 7z unexpectedly compressed file contents.'
+    $signature = [IO.File]::ReadAllBytes($zip)[0..5]
+    Assert (([BitConverter]::ToString($signature)) -eq '37-7A-BC-AF-27-1C') 'Output is not a 7z archive.'
     $output = @(Invoke-PackArchive $exe @('t', $zip) 'Test ZIP integrity' 6>&1)
     Assert ($output.Count -eq 0) 'Successful ZIP testing leaked native filenames or summaries.'
     foreach ($activity in @('Compress ZIP', 'Test ZIP integrity')) {

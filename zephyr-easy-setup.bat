@@ -13,14 +13,18 @@ if not exist "%~dp0scripts\zephyr-manager.ps1" (
     goto ReportElapsed
 )
 if /i "%~1"=="-InstallDir" goto NamedArguments
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\zephyr-manager.ps1" -Mode Online -Board "%~1" -Qualifier "%~2" -Toolchain "%~3" -Revision "%~4"
-goto Finished
+(
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\zephyr-manager.ps1" -Mode Online -Board "%~1" -Qualifier "%~2" -Toolchain "%~3" -Revision "%~4"
+    call set "RESULT=%%ERRORLEVEL%%"
+    goto ReportElapsed
+)
 
 :NamedArguments
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\zephyr-manager.ps1" -Mode Online %*
-
-:Finished
-set "RESULT=%ERRORLEVEL%"
+(
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\zephyr-manager.ps1" -Mode Online %*
+    call set "RESULT=%%ERRORLEVEL%%"
+    goto ReportElapsed
+)
 :ReportElapsed
 if defined ZEPHYR_START_TICKS powershell.exe -NoProfile -Command "$elapsed = [TimeSpan]::FromSeconds(([Diagnostics.Stopwatch]::GetTimestamp() - [long]$env:ZEPHYR_START_TICKS) / [Diagnostics.Stopwatch]::Frequency); Write-Host ('[TIME] Total elapsed: {0:00}:{1:00}:{2:00} ({3:F2} seconds)' -f [math]::Floor($elapsed.TotalHours), $elapsed.Minutes, $elapsed.Seconds, $elapsed.TotalSeconds)"
 if not defined ZEPHYR_NO_PAUSE pause
