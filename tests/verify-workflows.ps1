@@ -15,7 +15,7 @@ $toolsAssignment = $ast.EndBlock.Statements | Where-Object { $_ -is [Management.
 $Root = Join-Path $projectRoot ('offline_bundle\test-' + [guid]::NewGuid().ToString('N'))
 $fixtureRoot = $Root
 $Workspace = Join-Path $Root 'zephyrproject'
-$Cache = Join-Path $Root 'installers'
+$Cache = Join-Path $Root 'zephyr_installers'
 $Board = $Qualifier = $Toolchain = ''
 $junctionPath = Join-Path $Workspace 'linked-module'
 $script:registrationCalls = 0
@@ -49,6 +49,118 @@ try {
     Expect-Failure { Invoke-Checked 'cmd.exe' @('/c', 'exit', '7') } '*exit 7*'
     Write-Host '[PASS] Native errors propagate and deletion paths stay within their parent.'
 
+    # A leftover portable CMake ZIP must not satisfy the MSI offline installer requirement.
+    $cmakeTool = @($Tools | Where-Object { $_.Id -eq 'Kitware.CMake' })[0]
+    $cmakeCache = Join-Path $Root 'cmake-cache'
+    New-Item -ItemType Directory -Path $cmakeCache -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $cmakeCache 'CMake_portable.zip') -Value 'portable fixture'
+    $checkedFunction = ${function:Invoke-Checked}
+    try {
+        $script:installerDownloadCalls = 0
+        function Invoke-Checked([string]$Exe, [string[]]$Arguments) {
+            $script:installerDownloadCalls++
+            Assert ($Exe -eq 'winget.exe' -and $Arguments -contains 'download') 'Installer acquisition ran an unexpected command.'
+            $typeIndex = [Array]::IndexOf($Arguments, '--installer-type')
+            Assert ($typeIndex -ge 0 -and $Arguments[$typeIndex + 1] -eq 'wix') 'CMake download did not request its WiX MSI installer.'
+            $directoryIndex = [Array]::IndexOf($Arguments, '--download-directory')
+            Set-Content -LiteralPath (Join-Path $Arguments[$directoryIndex + 1] 'CMake_installer.msi') -Value 'MSI fixture'
+        }
+        Expect-Failure { Get-HostInstaller $cmakeTool $cmakeCache -CacheOnly } '*Missing cached installer: Kitware.CMake*'
+        Assert ($script:installerDownloadCalls -eq 0) 'CacheOnly downloaded an installer.'
+        $installer = Get-HostInstaller $cmakeTool $cmakeCache
+        Assert ($installer.Extension -eq '.msi' -and $script:installerDownloadCalls -eq 1) 'Portable ZIP prevented acquisition of the required MSI.'
+        $cachedInstaller = Get-HostInstaller $cmakeTool $cmakeCache -CacheOnly
+        Assert ($cachedInstaller.FullName -eq $installer.FullName -and $script:installerDownloadCalls -eq 1) 'Cached MSI was not reused alongside a ZIP.'
+        Assert (Test-Path -LiteralPath (Join-Path $cmakeCache 'CMake_portable.zip')) 'Existing portable ZIP was removed.'
+        Set-Content -LiteralPath (Join-Path $cmakeCache 'second.msi') -Value 'ambiguous fixture'
+        Expect-Failure { Get-HostInstaller $cmakeTool $cmakeCache } '*found 2*'
+    } finally { ${function:Invoke-Checked} = $checkedFunction }
+    Write-Host '[PASS] CMake acquisition selects WiX MSI, handles a leftover ZIP, and reuses the matching cache.'
+
+    # Verify every host download requests a format compatible with its offline install path.
+    $installerFormats = @(
+        @{ Id = 'Python.Python.3.12'; Type = 'burn'; Extension = '.exe' },
+        @{ Id = 'Git.Git'; Type = 'inno'; Extension = '.exe' },
+        @{ Id = 'Kitware.CMake'; Type = 'wix'; Extension = '.msi' },
+        @{ Id = '7zip.7zip'; Type = 'exe'; Extension = '.exe' },
+        @{ Id = 'Ninja-build.Ninja'; Type = 'zip'; Extension = '.zip' },
+        @{ Id = 'oss-winget.gperf'; Type = 'zip'; Extension = '.zip' },
+        @{ Id = 'oss-winget.dtc'; Type = 'zip'; Extension = '.zip' }
+    )
+    $checkedFunction = ${function:Invoke-Checked}
+    try {
+        function Invoke-Checked([string]$Exe, [string[]]$Arguments) {
+            $script:installerDownloadCalls++
+            $typeIndex = [Array]::IndexOf($Arguments, '--installer-type')
+            $idIndex = [Array]::IndexOf($Arguments, '--id')
+            Assert ($Exe -eq 'winget.exe' -and $Arguments[$idIndex + 1] -eq $script:expectedFormat.Id) 'Unexpected host installer download.'
+            Assert ($typeIndex -ge 0 -and $Arguments[$typeIndex + 1] -eq $script:expectedFormat.Type) 'Host download requested an incompatible installer type.'
+            $directoryIndex = [Array]::IndexOf($Arguments, '--download-directory')
+            Set-Content -LiteralPath (Join-Path $Arguments[$directoryIndex + 1] ('installer' + $script:expectedFormat.Extension)) -Value 'host installer fixture'
+        }
+        foreach ($format in $installerFormats) {
+            $script:expectedFormat = $format
+            $script:installerDownloadCalls = 0
+            $tool = @($Tools | Where-Object { $_.Id -eq $format.Id })[0]
+            $toolCache = Join-Path $Root ('format-cache\' + $format.Id)
+            New-Item -ItemType Directory -Path $toolCache -Force | Out-Null
+            # Reproduce 7-Zip's leftover MSI while its offline flow requires an EXE.
+            if ($format.Id -eq '7zip.7zip') { Set-Content -LiteralPath (Join-Path $toolCache '7-Zip_previous.msi') -Value 'MSI fixture' }
+            $installer = Get-HostInstaller $tool $toolCache
+            Assert ($installer.Extension -eq $format.Extension -and $script:installerDownloadCalls -eq 1) 'Host installer extension does not match offline installation.'
+            $cached = Get-HostInstaller $tool $toolCache -CacheOnly
+            Assert ($cached.FullName -eq $installer.FullName -and $script:installerDownloadCalls -eq 1) 'Matching host installer was not reused.'
+        }
+    } finally { ${function:Invoke-Checked} = $checkedFunction }
+    Write-Host '[PASS] All seven host tools use explicit compatible installer formats; 7-Zip EXE is selected alongside a cached MSI.'
+
+    # Reproduce the URL freeze entry that used to be mistaken for a local install.
+    $script:freezeFixture = @('west==1.5.0', 'reuse @ https://example.invalid/reuse.tar.gz#sha256=abc')
+    $script:metadataVersion = '6.2.0'
+    function Invoke-FrozenPython {
+        $global:LASTEXITCODE = 0
+        if ($args -contains 'freeze') { $script:freezeFixture }
+        elseif ($args -contains '-c') { $script:metadataVersion }
+        else { throw 'Unexpected Python fixture invocation.' }
+    }
+    $pinned = @(ConvertTo-OfflineRequirements 'Invoke-FrozenPython' $script:freezeFixture)
+    Assert ($pinned.Count -eq 2 -and $pinned[1] -eq 'reuse==6.2.0') 'Remote dependency did not retain its installed version.'
+    $remoteRequirements = Join-Path $Workspace 'zephyr\scripts\remote.txt'
+    $includedRequirements = Join-Path $Workspace 'zephyr\scripts\compliance.txt'
+    Set-Content -LiteralPath $remoteRequirements -Value '-r compliance.txt'
+    $remoteLine = 'reuse @ https://example.invalid/reuse.tar.gz; sys_platform == "win32"'
+    Set-Content -LiteralPath $includedRequirements -Value $remoteLine
+    $offlineRequirements = Copy-OfflineRequirements $remoteRequirements $Workspace (Join-Path $Root 'requirements-test') $script:freezeFixture $pinned
+    $offlineIncluded = Join-Path $Root 'requirements-test\zephyr\scripts\compliance.txt'
+    Assert ((Get-Content -LiteralPath $offlineIncluded) -eq 'reuse==6.2.0; sys_platform == "win32"') 'Included remote requirement or environment marker was not normalized.'
+    Assert ((Get-Content -LiteralPath $offlineRequirements) -eq ('-r "' + $offlineIncluded + '"')) 'Requirement include did not point to staging.'
+    Assert ((Get-Content -LiteralPath $includedRequirements) -eq $remoteLine) 'Original requirements were edited.'
+    Set-Content -LiteralPath $includedRequirements -Value 'reuse @ https://example.invalid/different.tar.gz'
+    Expect-Failure { Copy-OfflineRequirements $includedRequirements $Workspace (Join-Path $Root 'requirements-mismatch') $script:freezeFixture $pinned } '*does not match the installed source*'
+    foreach ($line in @('-e D:\local-package', 'reuse @ file:///D:/local-package', 'reuse @ git+https://example.invalid/reuse.git')) {
+        Expect-Failure { ConvertTo-OfflineRequirements 'Invoke-FrozenPython' @($line) } '*local/editable or unsupported*'
+    }
+    $script:metadataVersion = ''
+    Expect-Failure { ConvertTo-OfflineRequirements 'Invoke-FrozenPython' $script:freezeFixture } '*Cannot determine installed version*'
+    $script:metadataVersion = '6.2.0'
+    $checkedFunction = ${function:Invoke-Checked}
+    try {
+        $script:wheelCalls = @()
+        function Invoke-Checked([string]$Exe, [string[]]$Arguments) { $script:wheelCalls += ,$Arguments }
+        $pythonCache = Join-Path $Root 'python-cache'
+        $requirements = Save-PythonWheelCache 'Invoke-FrozenPython' $pythonCache
+        Assert ((Get-Content -LiteralPath $requirements) -contains 'reuse==6.2.0') 'Offline requirements lost the version pin.'
+        Assert ((Get-Content -LiteralPath (Join-Path $pythonCache 'requirements-source.txt')) -contains $script:freezeFixture[1]) 'Original URL or hash was lost.'
+        Assert ($script:wheelCalls.Count -eq 2 -and $script:wheelCalls[0] -contains 'wheel' -and $script:wheelCalls[0] -contains (Join-Path $pythonCache 'requirements-source.txt')) 'Online packaging did not build from the original requirements.'
+        Assert ($script:wheelCalls[1] -contains '--no-index' -and $script:wheelCalls[1] -contains $requirements) 'Wheel validation is not offline.'
+        $script:wheelCalls = @()
+        $null = Save-PythonWheelCache 'Invoke-FrozenPython' $pythonCache -CacheOnly
+        Assert ($script:wheelCalls.Count -eq 1 -and $script:wheelCalls[0] -contains 'download' -and $script:wheelCalls[0] -contains '--no-index' -and $script:wheelCalls[0] -contains $requirements) 'CacheOnly attempted a remote wheel build.'
+        $script:freezeFixture = @('reuse==6.2.0')
+        Expect-Failure { Save-PythonWheelCache 'Invoke-FrozenPython' $pythonCache } '*west is not installed*'
+    } finally { ${function:Invoke-Checked} = $checkedFunction }
+    Write-Host '[PASS] Remote Python sources become pinned wheels; cache-only avoids URLs and local/editable installs remain rejected.'
+
     $settings = Get-Settings $Workspace
     Assert ($settings.Board -eq 'it51xxx_evb') 'Default board lost.'
     $Board = 'stm32f4_disco'; $Toolchain = 'arm-zephyr-eabi'
@@ -64,6 +176,10 @@ try {
     Assert (Test-Path -LiteralPath "$Workspace\.venv\sentinel") 'Copy removed source data.'
     Assert (Test-Path -LiteralPath "$copyTarget\.west\config") 'Copy omitted hidden west metadata.'
     Assert (-not (Test-Path -LiteralPath "$copyTarget\.venv")) 'Copy included virtual environment.'
+    $copyWithSpaces = Join-Path $Root 'copy with spaces'
+    Copy-Tree ($copyTarget + '\') $copyWithSpaces
+    Assert ((Get-FileHash -LiteralPath (Join-Path $copyWithSpaces 'app\user.c')).Hash -eq $originalHash) 'Native copy argument quoting lost data in a path with spaces or a trailing separator.'
+    Expect-Failure { Copy-Tree $copyTarget "$Root\unrelated\sentinel" } '*robocopy exit*'
     Write-Host '[PASS] Staging preserves source and hidden west metadata, excluding .venv.'
 
     $entries = @()
@@ -123,7 +239,51 @@ try {
     Assert ($LASTEXITCODE -eq 1) 'Offline wrapper lost error exit code.'
     & cmd.exe /c "$Root\zephyr-pack-offline.bat" -CacheOnly | Out-Host
     Assert ($LASTEXITCODE -eq 1) 'Pack wrapper lost error exit code.'
+    $selectedData = Join-Path $Root 'selected-data'
+    $output = @(& cmd.exe /c "$Root\zephyr-offline-install.bat" -InstallDir $selectedData -CheckOnly)
+    Assert ($LASTEXITCODE -eq 1 -and ($output -join "`n").Contains((Join-Path $selectedData 'bundle-manifest.json'))) 'Offline wrapper did not read the selected data directory.'
+    $output = @(& cmd.exe /c "$Root\zephyr-pack-offline.bat" -InstallDir $selectedData -CacheOnly)
+    Assert ($LASTEXITCODE -eq 1 -and ($output -join "`n").Contains((Join-Path $selectedData 'zephyrproject'))) 'Pack wrapper did not select the requested workspace.'
+    Copy-Item -LiteralPath (Join-Path $projectRoot 'zephyr-uninstall.bat') -Destination $Root
+    $output = @('n' | & cmd.exe /c "$Root\zephyr-uninstall.bat" -InstallDir $selectedData)
+    Assert ($LASTEXITCODE -eq 0 -and ($output -join "`n").Contains('Cancelled. No changes made.')) 'Uninstall wrapper did not accept the selected directory and cancellation.'
+    Assert (-not (Test-Path -LiteralPath $selectedData)) 'Selected data directory was created during read-only checks.'
+    Copy-Tree $copyTarget (Join-Path $selectedData 'zephyrproject')
+    Copy-Tree $Cache (Join-Path $selectedData 'zephyr_installers')
+    $manifest.Files = @(@{ Path = $payloadPath; Sha256 = $originalHash })
+    Save-Json $manifest (Join-Path $selectedData 'bundle-manifest.json')
+    $output = @(& cmd.exe /c "$Root\zephyr-offline-install.bat" -InstallDir $selectedData -CheckOnly)
+    Assert ($LASTEXITCODE -eq 0 -and ($output -join "`n").Contains('[OK] Bundle checksums and installer inventory verified.')) 'Offline wrapper did not validate a data-only bundle in the selected directory.'
+    Assert (-not (Test-Path -LiteralPath (Join-Path $selectedData 'scripts'))) 'Data-only bundle unexpectedly contains manager scripts.'
+    Assert (-not (Test-Path -LiteralPath (Join-Path $selectedData 'zephyrproject\.venv'))) 'Offline CheckOnly created a virtual environment.'
+    $zipPlaceholder = Join-Path $Root 'bundle.zip'
+    Set-Content -LiteralPath $zipPlaceholder -Value 'No extraction should be attempted during CheckOnly.'
+    $output = @(& cmd.exe /c "$Root\zephyr-offline-install.bat" $zipPlaceholder $selectedData -CheckOnly)
+    Assert ($LASTEXITCODE -eq 0 -and ($output -join "`n").Contains('[OK] Bundle checksums and installer inventory verified.')) 'Positional Offline CheckOnly did not validate the already extracted bundle.'
     Write-Host '[PASS] Batch entry points return exit 1 for incomplete environments.'
+
+    # Use the real parameter declaration to check offline positional and named binding.
+    $probeBody = @'
+@{ Mode=$Mode; BundlePath=$BundlePath; InstallDir=$InstallDir; Board=$Board; Toolchain=$Toolchain; CheckOnly=[bool]$CheckOnly } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $PSScriptRoot 'arguments.json')
+exit 9
+'@
+    Set-Content -LiteralPath "$Root\scripts\zephyr-manager.ps1" -Value ($ast.ParamBlock.Extent.Text + "`n" + $probeBody) -Encoding UTF8
+    $offlineCases = @(
+        @{ Args = @('D:\zephyr-offline-bundle.zip', 'D:\'); Zip = 'D:\zephyr-offline-bundle.zip'; Install = 'D:\'; Check = $false; Board = ''; Toolchain = '' },
+        @{ Args = @('"D:\offline media\zephyr-offline-bundle.zip"', 'D:\', '-CheckOnly'); Zip = 'D:\offline media\zephyr-offline-bundle.zip'; Install = 'D:\'; Check = $true; Board = ''; Toolchain = '' },
+        @{ Args = @('D:\bundle.zip', 'D:\zephyr', '-Board', 'stm32f4_disco', '-Toolchain', 'arm-zephyr-eabi'); Zip = 'D:\bundle.zip'; Install = 'D:\zephyr'; Check = $false; Board = 'stm32f4_disco'; Toolchain = 'arm-zephyr-eabi' },
+        @{ Args = @('-BundlePath', 'D:\bundle.zip', '-InstallDir', 'D:\', '-CheckOnly'); Zip = 'D:\bundle.zip'; Install = 'D:\'; Check = $true; Board = ''; Toolchain = '' }
+    )
+    foreach ($case in $offlineCases) {
+        $caseArgs = $case.Args
+        $output = @(& cmd.exe /c "$Root\zephyr-offline-install.bat" @caseArgs)
+        Assert ($LASTEXITCODE -eq 9) 'Offline argument binding or timing changed the helper exit code.'
+        $arguments = Get-Content -LiteralPath "$Root\scripts\arguments.json" -Raw | ConvertFrom-Json
+        Assert ($arguments.Mode -eq 'Offline' -and $arguments.BundlePath -eq $case.Zip -and $arguments.InstallDir -eq $case.Install) 'Offline ZIP or install directory was bound to the wrong parameter.'
+        Assert ($arguments.CheckOnly -eq $case.Check -and $arguments.Board -eq $case.Board -and $arguments.Toolchain -eq $case.Toolchain) 'Offline trailing options changed.'
+        Assert (@($output | Where-Object { $_ -like '[[]TIME]*' }).Count -eq 1) 'Offline positional invocation lost elapsed time reporting.'
+    }
+    Write-Host '[PASS] Offline ZIP/destination positional arguments preserve drive roots, quoted ZIP paths, trailing options and named syntax.'
 
     # Verify legacy online positional parameters without running installers.
     Copy-Item -LiteralPath (Join-Path $projectRoot 'zephyr-easy-setup.bat') -Destination $Root
@@ -197,19 +357,15 @@ public static class BuildExitStub {
     Install-Online
     Assert (-not (Test-Path -LiteralPath $Root)) 'Online path check wrote files.'
     $CheckOnly = $false
-    Copy-InstallerPackage
-    Assert (Test-Path -LiteralPath "$Root\scripts\zephyr-manager.ps1") 'Selected installation is missing its helper.'
-    Assert (Test-Path -LiteralPath "$Root\zephyr-uninstall.bat") 'Selected installation is missing its uninstaller.'
-    Assert (Test-Path -LiteralPath "$Root\tests\verify-workflows.ps1") 'Selected installation is missing its test suite.'
     # Selecting a drive root is read-only here; never install or uninstall there.
     $driveRoot = [IO.Path]::GetPathRoot($fixtureRoot)
     $InstallDir = $driveRoot
     Select-InstallDirectory
     Assert ($Root -eq $driveRoot) 'Drive root lost its absolute-path separator.'
     Assert ($Workspace -eq (Join-Path $driveRoot 'zephyrproject')) 'Drive-root workspace is incorrect.'
-    Assert ($Cache -eq (Join-Path $driveRoot 'installers')) 'Drive-root cache is incorrect.'
+    Assert ($Cache -eq (Join-Path $driveRoot 'zephyr_installers')) 'Drive-root cache is incorrect.'
     Assert ((Get-ToolsDirectory) -eq (Join-Path $Workspace '.host-tools')) 'Drive-root tools escaped the workspace.'
-    Assert ((Get-RelativeBundlePath (Join-Path $Cache 'tools\installer.zip') $Root) -eq 'installers\tools\installer.zip') 'Drive-root bundle path lost a character.'
+    Assert ((Get-RelativeBundlePath (Join-Path $Cache 'tools\installer.zip') $Root) -eq 'zephyr_installers\tools\installer.zip') 'Drive-root bundle path lost a character.'
     Expect-Failure { Remove-Local $driveRoot $driveRoot } '*outside the expected*'
     $InstallDir = ''
     Set-Answers @($driveRoot)
@@ -223,33 +379,6 @@ public static class BuildExitStub {
     $output = @(& cmd.exe /c (Join-Path $projectRoot 'zephyr-easy-setup.bat') -InstallDir $driveRoot -CheckOnly)
     Assert ($LASTEXITCODE -eq 0) 'Actual launcher rejected the drive-root installation path.'
     Assert (($output -join "`n").Contains("Zephyr workspace:       $Workspace")) 'Actual launcher reported a wrong drive-root workspace.'
-    # Exercise the actual copy function with writes captured in this child scope.
-    # Treat destination children as absent, without touching the real drive root.
-    & {
-        $copied = New-Object 'System.Collections.Generic.List[string]'
-        $created = New-Object 'System.Collections.Generic.List[string]'
-        function Test-Path([string]$LiteralPath, [string]$PathType) {
-            if ($LiteralPath -eq $driveRoot) { return $true }
-            if ($LiteralPath.StartsWith($projectRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
-                return Microsoft.PowerShell.Management\Test-Path -LiteralPath $LiteralPath -PathType Leaf
-            }
-            return $false
-        }
-        function Assert-NoLinks([string]$Path) { }
-        function New-Item([string]$ItemType, [string]$Path, [switch]$Force) {
-            Assert ($Path -ne $driveRoot) 'Copy attempted to create the existing drive root.'
-            $created.Add($Path)
-        }
-        function Copy-Item([string]$LiteralPath, [string]$Destination, [switch]$Force) {
-            $copied.Add($Destination)
-        }
-        Copy-InstallerPackage
-        Assert ($copied.Count -eq 8) 'Drive-root package copy did not process all files.'
-        Assert ($copied.Contains((Join-Path $driveRoot 'zephyr-easy-setup.bat'))) 'Drive-root launcher destination changed.'
-        Assert ($created.Contains((Join-Path $driveRoot 'scripts'))) 'Missing helper directory was not created.'
-        Assert ($created.Contains((Join-Path $driveRoot 'tests'))) 'Missing test directory was not created.'
-    }
-    Write-Host '[PASS] Drive-root package copy skips root creation and prepares helper directories.'
     Write-Host '[PASS] Drive-root selection keeps absolute paths, owned tools and complete bundle paths.'
     $InstallDir = "$fixtureRoot\path with spaces"
     Expect-Failure { Select-InstallDirectory } '*must not contain spaces*'
@@ -261,12 +390,12 @@ public static class BuildExitStub {
     finally { [IO.Directory]::Delete("$fixtureRoot\install-link") }
     $Root = $fixtureRoot
     $Workspace = Join-Path $Root 'zephyrproject'
-    $Cache = Join-Path $Root 'installers'
-    Write-Host '[PASS] Install-directory prompt, named selection, path validation and copied launchers work.'
+    $Cache = Join-Path $Root 'zephyr_installers'
+    Write-Host '[PASS] Install-directory prompt, named selection and path validation work.'
 
     $missing = Join-Path $fixtureRoot 'missing-helper'
     New-Item -ItemType Directory -Path $missing -Force | Out-Null
-    foreach ($wrapper in @('zephyr-easy-setup.bat', 'zephyr-pack-offline.bat', 'zephyr-offline-install.bat', 'zephyr-uninstall.bat', 'zephyr-env.cmd')) {
+    foreach ($wrapper in @('zephyr-easy-setup.bat', 'zephyr-pack-offline.bat', 'zephyr-offline-install.bat', 'zephyr-uninstall.bat')) {
         $destination = Join-Path $missing $wrapper
         Copy-Item -LiteralPath (Join-Path $projectRoot $wrapper) -Destination $destination
         $output = @(& cmd.exe /c $destination)

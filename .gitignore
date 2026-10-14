@@ -18,5 +18,7 @@ Thumbs.db
 
 # Offline packaging artifacts
 installers/
+zephyr_installers/
 tools/
 offline_bundle/
+zephyr-offline-bootstrap/
